@@ -8,6 +8,8 @@
   LINE BOT for FREE
 </h2>
 このボットはラインのログ＆チャット監視ですご自身に合うように.envを作成してご使用下さい
+
+<h6>
 （例）
 LINE_CHANNEL_ACCESS_TOKEN=ここにLINEのアクセストークン
 LINE_CHANNEL_SECRET=ここにLINEのチャネルシークレット
@@ -19,6 +21,7 @@ CLOUDINARY_API_KEY=xxxx
 CLOUDINARY_API_SECRET=xxxx
 
 PORT=3000
+</h6>
 
 <h2>配布について</h2>
 改造OKです
