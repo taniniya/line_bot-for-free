@@ -1,3 +1,7 @@
+import http from "http";
+http.createServer((req, res) => res.end("botOK!")).listen(8000);
+
+
 require("dotenv").config()
 
 const express = require("express")
@@ -208,5 +212,6 @@ function cleanup(...files) {
 app.listen(process.env.PORT, () => {
   console.log(`Bot running on port ${process.env.PORT}`)
 })
+
 
 
