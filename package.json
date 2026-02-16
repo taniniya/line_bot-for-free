@@ -9,7 +9,7 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "type": "commonjs",
+  "type": "module"
   "dependencies": {
     "@line/bot-sdk": "^10.6.0",
     "axios": "^1.13.5",
