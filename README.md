@@ -5,8 +5,8 @@
 </div>
 
 <h2 align="center">
-  reviewdog - A code review dog who keeps your codebase healthy.
+  LINE BOT for FREE
 </h2>
-
+タニシが作ったものです
 
   
