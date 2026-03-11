@@ -115,6 +115,8 @@ async function handleText(event) {
   const text = event.message.text || ""
 
   await addMessage(userId)
+  const userHandled = await handleUserCommands(event, text)
+  if (userHandled) return
   const adminHandled = await handleAdminCommands(event, text)
   if (adminHandled) return
 
@@ -250,6 +252,15 @@ function dbAll(sql, params = []) {
   })
 }
 
+function dbGet(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.get(sql, params, (err, row) => {
+      if (err) return reject(err)
+      resolve(row)
+    })
+  })
+}
+
 async function ensureUser(userId) {
   await dbRun(
     "INSERT OR IGNORE INTO users (user_id, coins, messages) VALUES (?, 0, 0)",
@@ -265,6 +276,35 @@ async function addMessage(userId) {
 async function addCoins(userId, amount) {
   await ensureUser(userId)
   await dbRun("UPDATE users SET coins = coins + ? WHERE user_id = ?", [amount, userId])
+}
+
+async function getCoins(userId) {
+  await ensureUser(userId)
+  const row = await dbGet("SELECT coins FROM users WHERE user_id = ?", [userId])
+  return row ? Number(row.coins || 0) : 0
+}
+
+async function transferCoins(fromId, toId, amount) {
+  await ensureUser(fromId)
+  await ensureUser(toId)
+
+  await dbRun("BEGIN IMMEDIATE")
+  try {
+    const row = await dbGet("SELECT coins FROM users WHERE user_id = ?", [fromId])
+    const balance = row ? Number(row.coins || 0) : 0
+    if (balance < amount) {
+      await dbRun("ROLLBACK")
+      return { ok: false, balance }
+    }
+
+    await dbRun("UPDATE users SET coins = coins - ? WHERE user_id = ?", [amount, fromId])
+    await dbRun("UPDATE users SET coins = coins + ? WHERE user_id = ?", [amount, toId])
+    await dbRun("COMMIT")
+    return { ok: true, balance: balance - amount }
+  } catch (e) {
+    await dbRun("ROLLBACK")
+    throw e
+  }
 }
 
 async function getRank(key, limit = null) {
@@ -299,6 +339,50 @@ async function replyText(event, text) {
   })
 }
 
+// ===== User Commands =====
+async function handleUserCommands(event, text) {
+  const trimmed = text.trim()
+
+  const payMatch = trimmed.match(/^\/pay\b/i)
+  if (payMatch) {
+    const mentioned = getMentionedUserIds(event)
+    if (mentioned.length === 0) {
+      await replyText(event, "メンションされたユーザーが見つかりません。")
+      return true
+    }
+
+    const amountMatch = trimmed.match(/(-?\d+)/)
+    if (!amountMatch) {
+      await replyText(event, "渡すコインの数を指定してください。")
+      return true
+    }
+
+    const amount = Number(amountMatch[1])
+    if (!Number.isFinite(amount) || amount <= 0) {
+      await replyText(event, "コインの数は1以上で指定してください。")
+      return true
+    }
+
+    const fromId = event.source.userId
+    const toId = mentioned[0]
+    if (fromId === toId) {
+      await replyText(event, "自分自身には送れません。")
+      return true
+    }
+
+    const result = await transferCoins(fromId, toId, amount)
+    if (!result.ok) {
+      await replyText(event, `コインが足りません。（所持：${result.balance}）`)
+      return true
+    }
+
+    await replyText(event, `🪙${amount}を送信しました。`)
+    return true
+  }
+
+  return false
+}
+
 async function handleAdminCommands(event, text) {
   const userId = event.source.userId
   if (!isAdmin(userId)) return false
@@ -317,7 +401,7 @@ async function handleAdminCommands(event, text) {
     const targetId = mentioned[0]
     await addCoins(targetId, amount)
 
-    await replyText(event, `コインを${amount}付与しました。`)
+    await replyText(event, `🪙を${amount}付与しました。`)
     return true
   }
 
@@ -367,4 +451,3 @@ async function buildRankText(key, title) {
 app.listen(process.env.PORT, () => {
   console.log(`Bot running on port ${process.env.PORT}`)
 })
-
