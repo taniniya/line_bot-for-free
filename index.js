@@ -343,6 +343,13 @@ async function replyText(event, text) {
 async function handleUserCommands(event, text) {
   const trimmed = text.trim()
 
+  if (trimmed === "/mycoin") {
+    const userId = event.source.userId
+    const coins = await getCoins(userId)
+    await replyText(event, `所持コイン：${coins}`)
+    return true
+  }
+
   const payMatch = trimmed.match(/^\/pay\b/i)
   if (payMatch) {
     const mentioned = getMentionedUserIds(event)
