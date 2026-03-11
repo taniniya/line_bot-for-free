@@ -20,7 +20,9 @@ const handledEvents = new Set()
 // Add multiple admin user IDs here.
 const ADMIN_IDS = [
   "U3312c4d10c5721a06015134973db2eb4",
-  "U3312c4d10c5721a06015134973db2eb4"
+  "U3312c4d10c5721a06015134973db2eb4",
+  "U5129d0ffa6c01a6c1423143888e52568",
+  
 ]
 
 // ===== LINE =====
@@ -42,7 +44,7 @@ db.serialize(() => {
 const app = express()
 
 app.post("/webhook", line.middleware(lineConfig), (req, res) => {
-  // 箝・雜・㍾隕・ｼ壼・縺ｫ200霑斐☆
+  // 超重要：先に200返す
   res.sendStatus(200)
 
   ;(async () => {
@@ -57,11 +59,11 @@ app.post("/webhook", line.middleware(lineConfig), (req, res) => {
         }
 
         if (event.type === "memberJoined") {
-          await sendDiscord(`側 JOIN\n${event.joined.members[0].userId}`)
+          await sendDiscord(`JOIN\n${event.joined.members[0].userId}`)
         }
 
         if (event.type === "memberLeft") {
-          await sendDiscord(`側 LEAVE\n${event.left.members[0].userId}`)
+          await sendDiscord(`LEAVE\n${event.left.members[0].userId}`)
         }
       } catch (e) {
         console.error("event error:", e)
@@ -70,7 +72,7 @@ app.post("/webhook", line.middleware(lineConfig), (req, res) => {
   })()
 })
 
-// ===== 蜀埼・亟豁｢ =====
+// ===== 再送防止 =====
 function isHandled(event) {
   const id = event.message?.id
   if (!id) return false
@@ -82,7 +84,7 @@ function isHandled(event) {
   return false
 }
 
-// ===== 蜈ｱ騾・=====
+// ===== 共通 =====
 async function getProfile(userId) {
   try {
     const p = await lineClient.getProfile(userId)
@@ -105,7 +107,7 @@ async function getLineContent(messageId) {
   return Buffer.from(res.data)
 }
 
-// ===== 繝・く繧ｹ繝・=====
+// ===== テキスト =====
 async function handleText(event) {
   const userId = event.source.userId
   const text = event.message.text || ""
@@ -123,7 +125,7 @@ async function handleText(event) {
   )
 }
 
-// ===== 逕ｻ蜒・=====
+// ===== 画像 =====
 async function handleImage(event) {
   const name = await getProfile(event.source.userId)
   const buffer = await getLineContent(event.message.id)
@@ -141,7 +143,7 @@ async function handleImage(event) {
   )
 }
 
-// ===== 蜍慕判 =====
+// ===== 動画 =====
 async function handleVideo(event) {
   const name = await getProfile(event.source.userId)
   const buffer = await getLineContent(event.message.id)
@@ -179,7 +181,7 @@ async function handleVideo(event) {
   await sendDiscord(`動画サイズオーバー\n送信者：${name}`)
 }
 
-// ===== 蝨ｧ邵ｮ =====
+// ===== 圧縮 =====
 async function compressImage(buffer) {
   if (buffer.length <= MAX_SIZE) return { ok: true, buffer, step: 0 }
 
@@ -317,6 +319,25 @@ async function handleAdminCommands(event, text) {
     return true
   }
 
+  const uidMatch = trimmed.match(/^\/uid\b/i)
+  if (uidMatch) {
+    const mentioned = getMentionedUserIds(event)
+    if (mentioned.length === 0) {
+      await replyText(event, "メンションされたユーザーが見つかりません。")
+      return true
+    }
+
+    const lines = await Promise.all(
+      mentioned.map(async (id) => {
+        const name = await getProfile(id)
+        return `${name}\n${id}`
+      })
+    )
+    await sendDiscord(`UID\n${lines.join("\n\n")}`)
+    await replyText(event, "Discordに送信しました。")
+    return true
+  }
+
   if (trimmed === "/rank") {
     const lines = await buildRankText("messages", "発言回数ランキング")
     await replyText(event, lines)
@@ -340,11 +361,8 @@ async function buildRankText(key, title) {
   const lines = rows.map((r, i) => `${i + 1}位 ${names[i]} ${r.value}`)
   return `${title}\n${lines.join("\n")}`
 }
-// ===== 襍ｷ蜍・=====
+// ===== 起動 =====
 app.listen(process.env.PORT, () => {
   console.log(`Bot running on port ${process.env.PORT}`)
 })
-
-
-
 
