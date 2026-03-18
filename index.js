@@ -540,6 +540,10 @@ async function handleUserCommands(event, text) {
       return true
     } catch (e) {
       console.error("ai error:", e)
+      if (e?.response) {
+        console.error("ai error status:", e.response.status)
+        console.error("ai error data:", e.response.data)
+      }
       if (isQuotaError(e)) {
         await replyText(event, "APIの制限に到達しました。時間をおいて再度お試しください。")
       } else {
@@ -574,6 +578,10 @@ async function handleUserCommands(event, text) {
       return true
     } catch (e) {
       console.error("img error:", e)
+      if (e?.response) {
+        console.error("img error status:", e.response.status)
+        console.error("img error data:", e.response.data)
+      }
       if (isQuotaError(e)) {
         await replyText(event, "APIの制限に到達しました。時間をおいて再度お試しください。")
       } else {
