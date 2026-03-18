@@ -15,6 +15,10 @@ ffmpeg.setFfmpegPath(ffmpegPath)
 
 const MAX_SIZE = 8 * 1024 * 1024
 const handledEvents = new Set()
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash-lite"
+const IMAGEN_MODEL = process.env.IMAGEN_MODEL || "imagen-4.0-generate-001"
+const DAILY_LIMIT_TEXT = Number(process.env.DAILY_LIMIT_TEXT || "20")
+const DAILY_LIMIT_IMAGE = Number(process.env.DAILY_LIMIT_IMAGE || "5")
 
 // ===== Admin =====
 // Add multiple admin user IDs here.
@@ -40,6 +44,9 @@ const db = new sqlite3.Database(path.join(__dirname, "data.db"))
 db.serialize(() => {
   db.run(
     "CREATE TABLE IF NOT EXISTS users (user_id TEXT PRIMARY KEY, coins INTEGER NOT NULL DEFAULT 0, messages INTEGER NOT NULL DEFAULT 0)"
+  )
+  db.run(
+    "CREATE TABLE IF NOT EXISTS daily_usage (user_id TEXT NOT NULL, date TEXT NOT NULL, kind TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(user_id, date, kind))"
   )
 })
 
@@ -285,6 +292,57 @@ async function getCoins(userId) {
   return row ? Number(row.coins || 0) : 0
 }
 
+function getTodayJst() {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(new Date())
+}
+
+function isUnlimitedUser(userId) {
+  return ADMIN_IDS.includes(userId)
+}
+
+async function consumeDailyQuota(userId, kind, limit) {
+  if (!Number.isFinite(limit) || limit <= 0) {
+    return { ok: true, remaining: null }
+  }
+  if (isUnlimitedUser(userId)) {
+    return { ok: true, remaining: null, unlimited: true }
+  }
+
+  const date = getTodayJst()
+  await dbRun(
+    "INSERT OR IGNORE INTO daily_usage (user_id, date, kind, count) VALUES (?, ?, ?, 0)",
+    [userId, date, kind]
+  )
+  const row = await dbGet(
+    "SELECT count FROM daily_usage WHERE user_id = ? AND date = ? AND kind = ?",
+    [userId, date, kind]
+  )
+  const count = row ? Number(row.count || 0) : 0
+  if (count >= limit) {
+    return { ok: false, remaining: 0, limit, count }
+  }
+  await dbRun(
+    "UPDATE daily_usage SET count = count + 1 WHERE user_id = ? AND date = ? AND kind = ?",
+    [userId, date, kind]
+  )
+  return { ok: true, remaining: limit - (count + 1), limit, count: count + 1 }
+}
+
+function isQuotaError(err) {
+  const status = err?.response?.status
+  const msg =
+    err?.response?.data?.error?.message ||
+    err?.response?.data?.message ||
+    err?.message ||
+    ""
+  return status === 429 || /quota|RESOURCE_EXHAUSTED|rate limit/i.test(msg)
+}
+
 async function transferCoins(fromId, toId, amount) {
   await ensureUser(fromId)
   await ensureUser(toId)
@@ -340,9 +398,190 @@ async function replyText(event, text) {
   })
 }
 
+async function askAi(prompt) {
+  const apiKey = process.env.GEMINI_API_KEY
+  if (!apiKey) {
+    return { ok: false, error: "GEMINI_API_KEY が未設定です。" }
+  }
+
+  const res = await axios.post(
+    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
+    {
+      contents: [
+        {
+          parts: [{ text: prompt }]
+        }
+      ]
+    },
+    {
+      headers: {
+        "x-goog-api-key": apiKey,
+        "Content-Type": "application/json"
+      },
+      timeout: 30000
+    }
+  )
+
+  const data = res.data || {}
+  const candidates = Array.isArray(data.candidates) ? data.candidates : []
+  const parts = candidates[0]?.content?.parts || []
+  const text = parts.map(p => p.text).filter(Boolean).join("\n").trim()
+  if (!text) return { ok: false, error: "AIの応答を取得できませんでした。" }
+  return { ok: true, text }
+}
+
+async function translateToEnglish(prompt) {
+  const apiKey = process.env.GEMINI_API_KEY
+  if (!apiKey) {
+    return { ok: false, error: "GEMINI_API_KEY が未設定です。" }
+  }
+
+  const res = await axios.post(
+    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
+    {
+      contents: [
+        {
+          parts: [
+            {
+              text:
+                "Translate the following Japanese text to concise English for image generation. Respond with English only.\n\n" +
+                prompt
+            }
+          ]
+        }
+      ]
+    },
+    {
+      headers: {
+        "x-goog-api-key": apiKey,
+        "Content-Type": "application/json"
+      },
+      timeout: 30000
+    }
+  )
+
+  const data = res.data || {}
+  const candidates = Array.isArray(data.candidates) ? data.candidates : []
+  const parts = candidates[0]?.content?.parts || []
+  const text = parts.map(p => p.text).filter(Boolean).join("\n").trim()
+  if (!text) return { ok: false, error: "翻訳に失敗しました。" }
+  return { ok: true, text }
+}
+
+async function generateImage(prompt) {
+  const apiKey = process.env.GEMINI_API_KEY
+  if (!apiKey) {
+    return { ok: false, error: "GEMINI_API_KEY が未設定です。" }
+  }
+
+  let finalPrompt = prompt
+  if (/[^\x00-\x7F]/.test(prompt)) {
+    const t = await translateToEnglish(prompt)
+    if (!t.ok) return t
+    finalPrompt = t.text
+  }
+
+  const res = await axios.post(
+    `https://generativelanguage.googleapis.com/v1beta/models/${IMAGEN_MODEL}:predict`,
+    {
+      instances: [{ prompt: finalPrompt }],
+      parameters: { sampleCount: 1 }
+    },
+    {
+      headers: {
+        "x-goog-api-key": apiKey,
+        "Content-Type": "application/json"
+      },
+      timeout: 60000
+    }
+  )
+
+  const data = res.data || {}
+  const preds = Array.isArray(data.predictions) ? data.predictions : []
+  const p0 = preds[0] || {}
+  const b64 =
+    p0.bytesBase64Encoded ||
+    p0.image?.bytesBase64Encoded ||
+    p0.image?.imageBytes ||
+    p0.imageBytes
+
+  if (!b64 || typeof b64 !== "string") {
+    return { ok: false, error: "画像の生成に失敗しました。" }
+  }
+
+  return { ok: true, buffer: Buffer.from(b64, "base64") }
+}
+
 // ===== User Commands =====
 async function handleUserCommands(event, text) {
   const trimmed = text.trim()
+
+  const aiMatch = trimmed.match(/^\/ai\s+([\s\S]+)/i)
+  if (aiMatch) {
+    const prompt = aiMatch[1].trim()
+    if (!prompt) {
+      await replyText(event, "話したい内容を入れてください。例：/ai こんにちは")
+      return true
+    }
+
+    try {
+      const quota = await consumeDailyQuota(event.source.userId, "text", DAILY_LIMIT_TEXT)
+      if (!quota.ok) {
+        await replyText(event, `本日の利用上限に達しました。（上限：${quota.limit}）`)
+        return true
+      }
+      const result = await askAi(prompt)
+      if (!result.ok) {
+        await replyText(event, result.error)
+        return true
+      }
+      await sendDiscord(`AI\nPrompt: ${prompt}\nResponse:\n${result.text}`)
+      await replyText(event, result.text)
+      return true
+    } catch (e) {
+      console.error("ai error:", e)
+      if (isQuotaError(e)) {
+        await replyText(event, "APIの制限に到達しました。時間をおいて再度お試しください。")
+      } else {
+        await replyText(event, "AIの呼び出しに失敗しました。")
+      }
+      return true
+    }
+  }
+
+  const imgMatch = trimmed.match(/^\/img\s+([\s\S]+)/i)
+  if (imgMatch) {
+    const prompt = imgMatch[1].trim()
+    if (!prompt) {
+      await replyText(event, "画像の内容を入れてください。例：/img 赤いスニーカー")
+      return true
+    }
+
+    try {
+      const quota = await consumeDailyQuota(event.source.userId, "image", DAILY_LIMIT_IMAGE)
+      if (!quota.ok) {
+        await replyText(event, `本日の画像生成上限に達しました。（上限：${quota.limit}）`)
+        return true
+      }
+      const result = await generateImage(prompt)
+      if (!result.ok) {
+        await replyText(event, result.error)
+        return true
+      }
+      await sendDiscord(`IMG\nPrompt: ${prompt}`)
+      await sendDiscordFile(result.buffer, "imagen.png", `IMAGE\nPrompt: ${prompt}`)
+      await replyText(event, "画像を生成しました。")
+      return true
+    } catch (e) {
+      console.error("img error:", e)
+      if (isQuotaError(e)) {
+        await replyText(event, "APIの制限に到達しました。時間をおいて再度お試しください。")
+      } else {
+        await replyText(event, "画像生成に失敗しました。")
+      }
+      return true
+    }
+  }
 
   if (trimmed === "/mycoin") {
     const userId = event.source.userId
@@ -435,6 +674,18 @@ async function handleAdminCommands(event, text) {
   if (trimmed === "/rank") {
     const lines = await buildRankText("messages", "発言回数ランキング")
     await replyText(event, lines)
+    return true
+  }
+
+  if (trimmed === "/admins") {
+    const ids = Array.from(new Set(ADMIN_IDS)).filter(Boolean)
+    if (ids.length === 0) {
+      await replyText(event, "管理者が登録されていません。")
+      return true
+    }
+    const names = await Promise.all(ids.map(id => getProfile(id)))
+    const lines = ids.map((id, i) => `${i + 1}. ${names[i]} ${id}`)
+    await replyText(event, `管理者一覧\n${lines.join("\n")}`)
     return true
   }
 
