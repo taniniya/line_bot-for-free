@@ -16,7 +16,7 @@ ffmpeg.setFfmpegPath(ffmpegPath)
 const MAX_SIZE = 8 * 1024 * 1024
 const handledEvents = new Set()
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash-lite"
-const IMAGEN_MODEL = process.env.IMAGEN_MODEL || "imagen-4.0-generate-001"
+const IMAGEN_MODEL = process.env.IMAGEN_MODEL || "gemini-2.5-flash-image"
 const DAILY_LIMIT_TEXT = Number(process.env.DAILY_LIMIT_TEXT || "20")
 const DAILY_LIMIT_IMAGE = Number(process.env.DAILY_LIMIT_IMAGE || "5")
 
@@ -430,62 +430,20 @@ async function askAi(prompt) {
   return { ok: true, text }
 }
 
-async function translateToEnglish(prompt) {
-  const apiKey = process.env.GEMINI_API_KEY
-  if (!apiKey) {
-    return { ok: false, error: "GEMINI_API_KEY が未設定です。" }
-  }
-
-  const res = await axios.post(
-    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
-    {
-      contents: [
-        {
-          parts: [
-            {
-              text:
-                "Translate the following Japanese text to concise English for image generation. Respond with English only.\n\n" +
-                prompt
-            }
-          ]
-        }
-      ]
-    },
-    {
-      headers: {
-        "x-goog-api-key": apiKey,
-        "Content-Type": "application/json"
-      },
-      timeout: 30000
-    }
-  )
-
-  const data = res.data || {}
-  const candidates = Array.isArray(data.candidates) ? data.candidates : []
-  const parts = candidates[0]?.content?.parts || []
-  const text = parts.map(p => p.text).filter(Boolean).join("\n").trim()
-  if (!text) return { ok: false, error: "翻訳に失敗しました。" }
-  return { ok: true, text }
-}
-
 async function generateImage(prompt) {
   const apiKey = process.env.GEMINI_API_KEY
   if (!apiKey) {
     return { ok: false, error: "GEMINI_API_KEY が未設定です。" }
   }
 
-  let finalPrompt = prompt
-  if (/[^\x00-\x7F]/.test(prompt)) {
-    const t = await translateToEnglish(prompt)
-    if (!t.ok) return t
-    finalPrompt = t.text
-  }
-
   const res = await axios.post(
-    `https://generativelanguage.googleapis.com/v1beta/models/${IMAGEN_MODEL}:predict`,
+    `https://generativelanguage.googleapis.com/v1beta/models/${IMAGEN_MODEL}:generateContent`,
     {
-      instances: [{ prompt: finalPrompt }],
-      parameters: { sampleCount: 1 }
+      contents: [
+        {
+          parts: [{ text: prompt }]
+        }
+      ]
     },
     {
       headers: {
@@ -497,19 +455,22 @@ async function generateImage(prompt) {
   )
 
   const data = res.data || {}
-  const preds = Array.isArray(data.predictions) ? data.predictions : []
-  const p0 = preds[0] || {}
-  const b64 =
-    p0.bytesBase64Encoded ||
-    p0.image?.bytesBase64Encoded ||
-    p0.image?.imageBytes ||
-    p0.imageBytes
+  const parts = data.candidates?.[0]?.content?.parts || []
+  const inline =
+    parts.find(p => p.inlineData && p.inlineData.data) ||
+    parts.find(p => p.inline_data && p.inline_data.data)
 
-  if (!b64 || typeof b64 !== "string") {
+  const b64 =
+    inline?.inlineData?.data ||
+    inline?.inline_data?.data ||
+    ""
+
+  if (!b64) {
     return { ok: false, error: "画像の生成に失敗しました。" }
   }
 
-  return { ok: true, buffer: Buffer.from(b64, "base64") }
+  const buffer = Buffer.from(b64, "base64")
+  return { ok: true, buffer }
 }
 
 // ===== User Commands =====
@@ -542,7 +503,7 @@ async function handleUserCommands(event, text) {
       console.error("ai error:", e)
       if (e?.response) {
         console.error("ai error status:", e.response.status)
-        console.error("ai error data:", e.response.data)
+        console.error("ai error data:", JSON.stringify(e.response.data))
       }
       if (isQuotaError(e)) {
         await replyText(event, "APIの制限に到達しました。時間をおいて再度お試しください。")
@@ -580,7 +541,7 @@ async function handleUserCommands(event, text) {
       console.error("img error:", e)
       if (e?.response) {
         console.error("img error status:", e.response.status)
-        console.error("img error data:", e.response.data)
+        console.error("img error data:", JSON.stringify(e.response.data))
       }
       if (isQuotaError(e)) {
         await replyText(event, "APIの制限に到達しました。時間をおいて再度お試しください。")
