@@ -21,6 +21,7 @@ const handledEvents = new Set()
 const ADMIN_IDS = [
   "U3312c4d10c5721a06015134973db2eb4",
   "U3312c4d10c5721a06015134973db2eb4",
+  "U7fda4ace4bdd23dc36b75fadfd7b0fd3",
   "U5129d0ffa6c01a6c1423143888e52568",
   "U0c3256073082dc61b471786a93d14465",
   "U5b5435164afb1310460ec3663e4c6fdf"
