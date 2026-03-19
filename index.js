@@ -7,7 +7,7 @@ const FormData = require("form-data")
 const sharp = require("sharp")
 const fs = require("fs")
 const path = require("path")
-const sqlite3 = require("sqlite3").verbose()
+const { Pool } = require("pg")
 const ffmpeg = require("fluent-ffmpeg")
 const ffmpegPath = require("ffmpeg-static")
 
@@ -16,9 +16,15 @@ ffmpeg.setFfmpegPath(ffmpegPath)
 const MAX_SIZE = 8 * 1024 * 1024
 const handledEvents = new Set()
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash-lite"
-const IMAGEN_MODEL = process.env.IMAGEN_MODEL || "gemini-2.5-flash-image"
+const OPENROUTER_TEXT_MODEL =
+  process.env.OPENROUTER_TEXT_MODEL || "nvidia/llama-nemotron-embed-vl-1b-v2:free"
+const OPENROUTER_HTTP_REFERER = process.env.OPENROUTER_HTTP_REFERER || ""
+const OPENROUTER_X_TITLE = process.env.OPENROUTER_X_TITLE || ""
 const DAILY_LIMIT_TEXT = Number(process.env.DAILY_LIMIT_TEXT || "20")
 const DAILY_LIMIT_IMAGE = Number(process.env.DAILY_LIMIT_IMAGE || "5")
+const DATABASE_URL = process.env.DATABASE_URL || ""
+const PGSSL =
+  process.env.PGSSL === "true" || /sslmode=require/i.test(DATABASE_URL)
 
 // ===== Admin =====
 // Add multiple admin user IDs here.
@@ -31,6 +37,10 @@ const ADMIN_IDS = [
   "U5b5435164afb1310460ec3663e4c6fdf"
   
 ]
+// Users who can use /adminoffbot and /adminonbot.
+const ADMIN_OFFBOT_IDS = [
+  "自分のID"
+]
 
 // ===== LINE =====
 const lineConfig = {
@@ -39,16 +49,35 @@ const lineConfig = {
 }
 const lineClient = new line.Client(lineConfig)
 
-// ===== SQLite =====
-const db = new sqlite3.Database(path.join(__dirname, "data.db"))
-db.serialize(() => {
-  db.run(
-    "CREATE TABLE IF NOT EXISTS users (user_id TEXT PRIMARY KEY, coins INTEGER NOT NULL DEFAULT 0, messages INTEGER NOT NULL DEFAULT 0)"
-  )
-  db.run(
-    "CREATE TABLE IF NOT EXISTS daily_usage (user_id TEXT NOT NULL, date TEXT NOT NULL, kind TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(user_id, date, kind))"
-  )
+// ===== PostgreSQL =====
+if (!DATABASE_URL) {
+  console.error("DATABASE_URL is required for PostgreSQL.")
+  process.exit(1)
+}
+
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  ssl: PGSSL ? { rejectUnauthorized: false } : false
 })
+
+function safeStringify(obj) {
+  try {
+    return JSON.stringify(obj)
+  } catch {
+    return "[unserializable]"
+  }
+}
+
+function logError(label, err, meta = {}) {
+  const base = {
+    label,
+    message: err?.message,
+    stack: err?.stack,
+    status: err?.response?.status,
+    data: err?.response?.data
+  }
+  console.error(safeStringify({ ...base, ...meta }))
+}
 
 // ===== Express =====
 const app = express()
@@ -76,7 +105,11 @@ app.post("/webhook", line.middleware(lineConfig), (req, res) => {
           await sendDiscord(`LEAVE\n${event.left.members[0].userId}`)
         }
       } catch (e) {
-        console.error("event error:", e)
+        logError("event_error", e, {
+          type: event?.type,
+          userId: event?.source?.userId,
+          messageType: event?.message?.type
+        })
       }
     }
   })()
@@ -242,54 +275,71 @@ function cleanup(...files) {
 }
 
 // ===== Data =====
-function dbRun(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.run(sql, params, function (err) {
-      if (err) return reject(err)
-      resolve(this)
-    })
-  })
+async function dbRun(sql, params = []) {
+  return pool.query(sql, params)
 }
 
-function dbAll(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => {
-      if (err) return reject(err)
-      resolve(rows)
-    })
-  })
+async function dbAll(sql, params = []) {
+  const res = await pool.query(sql, params)
+  return res.rows
 }
 
-function dbGet(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) => {
-      if (err) return reject(err)
-      resolve(row)
-    })
-  })
+async function dbGet(sql, params = []) {
+  const res = await pool.query(sql, params)
+  return res.rows[0] || null
 }
 
 async function ensureUser(userId) {
   await dbRun(
-    "INSERT OR IGNORE INTO users (user_id, coins, messages) VALUES (?, 0, 0)",
+    "INSERT INTO users (user_id, coins, messages) VALUES ($1, 0, 0) ON CONFLICT (user_id) DO NOTHING",
     [userId]
   )
 }
 
+async function ensureBotMuteTable() {
+  await dbRun(
+    "CREATE TABLE IF NOT EXISTS bot_mutes (user_id TEXT PRIMARY KEY, mode TEXT NOT NULL DEFAULT 'normal')"
+  )
+  try {
+    await dbRun("ALTER TABLE bot_mutes ADD COLUMN mode TEXT NOT NULL DEFAULT 'normal'")
+  } catch {
+    // ignore if column already exists
+  }
+}
+
 async function addMessage(userId) {
   await ensureUser(userId)
-  await dbRun("UPDATE users SET messages = messages + 1 WHERE user_id = ?", [userId])
+  await dbRun("UPDATE users SET messages = messages + 1 WHERE user_id = $1", [userId])
 }
 
 async function addCoins(userId, amount) {
   await ensureUser(userId)
-  await dbRun("UPDATE users SET coins = coins + ? WHERE user_id = ?", [amount, userId])
+  await dbRun("UPDATE users SET coins = coins + $1 WHERE user_id = $2", [amount, userId])
 }
 
 async function getCoins(userId) {
   await ensureUser(userId)
-  const row = await dbGet("SELECT coins FROM users WHERE user_id = ?", [userId])
+  const row = await dbGet("SELECT coins FROM users WHERE user_id = $1", [userId])
   return row ? Number(row.coins || 0) : 0
+}
+
+async function isBotMuted(userId) {
+  await ensureBotMuteTable()
+  const row = await dbGet("SELECT mode FROM bot_mutes WHERE user_id = $1", [userId])
+  if (!row) return { muted: false, mode: null }
+  return { muted: true, mode: row.mode || "normal" }
+}
+
+async function setBotMuted(userId, muted, mode = "normal") {
+  await ensureBotMuteTable()
+  if (muted) {
+    await dbRun(
+      "INSERT INTO bot_mutes (user_id, mode) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET mode = $2",
+      [userId, mode]
+    )
+  } else {
+    await dbRun("DELETE FROM bot_mutes WHERE user_id = $1", [userId])
+  }
 }
 
 function getTodayJst() {
@@ -314,23 +364,35 @@ async function consumeDailyQuota(userId, kind, limit) {
   }
 
   const date = getTodayJst()
-  await dbRun(
-    "INSERT OR IGNORE INTO daily_usage (user_id, date, kind, count) VALUES (?, ?, ?, 0)",
-    [userId, date, kind]
-  )
-  const row = await dbGet(
-    "SELECT count FROM daily_usage WHERE user_id = ? AND date = ? AND kind = ?",
-    [userId, date, kind]
-  )
-  const count = row ? Number(row.count || 0) : 0
-  if (count >= limit) {
-    return { ok: false, remaining: 0, limit, count }
+  const client = await pool.connect()
+  try {
+    await client.query("BEGIN")
+    await client.query(
+      "INSERT INTO daily_usage (user_id, date, kind, count) VALUES ($1, $2, $3, 0) ON CONFLICT (user_id, date, kind) DO NOTHING",
+      [userId, date, kind]
+    )
+    const rowRes = await client.query(
+      "SELECT count FROM daily_usage WHERE user_id = $1 AND date = $2 AND kind = $3 FOR UPDATE",
+      [userId, date, kind]
+    )
+    const count = rowRes.rows[0] ? Number(rowRes.rows[0].count || 0) : 0
+    if (count >= limit) {
+      await client.query("ROLLBACK")
+      return { ok: false, remaining: 0, limit, count }
+    }
+    const upd = await client.query(
+      "UPDATE daily_usage SET count = count + 1 WHERE user_id = $1 AND date = $2 AND kind = $3 RETURNING count",
+      [userId, date, kind]
+    )
+    await client.query("COMMIT")
+    const newCount = Number(upd.rows[0]?.count || count + 1)
+    return { ok: true, remaining: limit - newCount, limit, count: newCount }
+  } catch (e) {
+    await client.query("ROLLBACK")
+    throw e
+  } finally {
+    client.release()
   }
-  await dbRun(
-    "UPDATE daily_usage SET count = count + 1 WHERE user_id = ? AND date = ? AND kind = ?",
-    [userId, date, kind]
-  )
-  return { ok: true, remaining: limit - (count + 1), limit, count: count + 1 }
 }
 
 function isQuotaError(err) {
@@ -347,22 +409,33 @@ async function transferCoins(fromId, toId, amount) {
   await ensureUser(fromId)
   await ensureUser(toId)
 
-  await dbRun("BEGIN IMMEDIATE")
+  const client = await pool.connect()
   try {
-    const row = await dbGet("SELECT coins FROM users WHERE user_id = ?", [fromId])
-    const balance = row ? Number(row.coins || 0) : 0
+    await client.query("BEGIN")
+    const rowRes = await client.query(
+      "SELECT coins FROM users WHERE user_id = $1 FOR UPDATE",
+      [fromId]
+    )
+    const balance = rowRes.rows[0] ? Number(rowRes.rows[0].coins || 0) : 0
     if (balance < amount) {
-      await dbRun("ROLLBACK")
+      await client.query("ROLLBACK")
       return { ok: false, balance }
     }
-
-    await dbRun("UPDATE users SET coins = coins - ? WHERE user_id = ?", [amount, fromId])
-    await dbRun("UPDATE users SET coins = coins + ? WHERE user_id = ?", [amount, toId])
-    await dbRun("COMMIT")
+    await client.query(
+      "UPDATE users SET coins = coins - $1 WHERE user_id = $2",
+      [amount, fromId]
+    )
+    await client.query(
+      "UPDATE users SET coins = coins + $1 WHERE user_id = $2",
+      [amount, toId]
+    )
+    await client.query("COMMIT")
     return { ok: true, balance: balance - amount }
   } catch (e) {
-    await dbRun("ROLLBACK")
+    await client.query("ROLLBACK")
     throw e
+  } finally {
+    client.release()
   }
 }
 
@@ -374,14 +447,30 @@ async function getRank(key, limit = null) {
     )
   }
   return await dbAll(
-    `SELECT user_id, ${col} AS value FROM users ORDER BY ${col} DESC LIMIT ?`,
+    `SELECT user_id, ${col} AS value FROM users ORDER BY ${col} DESC LIMIT $1`,
     [limit]
   )
+}
+
+async function getUserRank(userId, key) {
+  const col = key === "coins" ? "coins" : "messages"
+  const row = await dbGet(
+    `SELECT rank FROM (
+      SELECT user_id, RANK() OVER (ORDER BY ${col} DESC) AS rank
+      FROM users
+    ) t WHERE user_id = $1`,
+    [userId]
+  )
+  return row ? Number(row.rank) : null
 }
 
 // ===== Admin Commands =====
 function isAdmin(userId) {
   return ADMIN_IDS.includes(userId)
+}
+
+function canAdminOffbot(userId) {
+  return ADMIN_OFFBOT_IDS.includes(userId)
 }
 
 function getMentionedUserIds(event) {
@@ -398,84 +487,83 @@ async function replyText(event, text) {
   })
 }
 
+function getOpenRouterHeaders(apiKey) {
+  const headers = {
+    Authorization: `Bearer ${apiKey}`,
+    "Content-Type": "application/json"
+  }
+  if (OPENROUTER_HTTP_REFERER) headers["HTTP-Referer"] = OPENROUTER_HTTP_REFERER
+  if (OPENROUTER_X_TITLE) headers["X-Title"] = OPENROUTER_X_TITLE
+  return headers
+}
+
 async function askAi(prompt) {
-  const apiKey = process.env.GEMINI_API_KEY
+  const apiKey = process.env.OPENROUTER_API_KEY
   if (!apiKey) {
-    return { ok: false, error: "GEMINI_API_KEY が未設定です。" }
+    return { ok: false, error: "OPENROUTER_API_KEY が未設定です。" }
   }
 
   const res = await axios.post(
-    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
+    "https://openrouter.ai/api/v1/chat/completions",
     {
-      contents: [
+      model: OPENROUTER_TEXT_MODEL,
+      messages: [
         {
-          parts: [{ text: prompt }]
-        }
+          role: "system",
+          content: "You are a helpful assistant. Always reply in Japanese."
+        },
+        { role: "user", content: prompt }
       ]
     },
     {
-      headers: {
-        "x-goog-api-key": apiKey,
-        "Content-Type": "application/json"
-      },
+      headers: getOpenRouterHeaders(apiKey),
       timeout: 30000
     }
   )
 
   const data = res.data || {}
-  const candidates = Array.isArray(data.candidates) ? data.candidates : []
-  const parts = candidates[0]?.content?.parts || []
-  const text = parts.map(p => p.text).filter(Boolean).join("\n").trim()
+  const text = data.choices?.[0]?.message?.content?.trim()
   if (!text) return { ok: false, error: "AIの応答を取得できませんでした。" }
   return { ok: true, text }
 }
 
-async function generateImage(prompt) {
-  const apiKey = process.env.GEMINI_API_KEY
-  if (!apiKey) {
-    return { ok: false, error: "GEMINI_API_KEY が未設定です。" }
-  }
-
-  const res = await axios.post(
-    `https://generativelanguage.googleapis.com/v1beta/models/${IMAGEN_MODEL}:generateContent`,
-    {
-      contents: [
-        {
-          parts: [{ text: prompt }]
-        }
-      ]
-    },
-    {
-      headers: {
-        "x-goog-api-key": apiKey,
-        "Content-Type": "application/json"
-      },
-      timeout: 60000
-    }
-  )
-
-  const data = res.data || {}
-  const parts = data.candidates?.[0]?.content?.parts || []
-  const inline =
-    parts.find(p => p.inlineData && p.inlineData.data) ||
-    parts.find(p => p.inline_data && p.inline_data.data)
-
-  const b64 =
-    inline?.inlineData?.data ||
-    inline?.inline_data?.data ||
-    ""
-
-  if (!b64) {
-    return { ok: false, error: "画像の生成に失敗しました。" }
-  }
-
-  const buffer = Buffer.from(b64, "base64")
-  return { ok: true, buffer }
-}
 
 // ===== User Commands =====
 async function handleUserCommands(event, text) {
   const trimmed = text.trim()
+
+  const muteState = await isBotMuted(event.source.userId)
+  if (muteState.muted) {
+    await replyText(event, "現在このアカウントの機能は無効化されています。")
+    return true
+  }
+
+  if (trimmed === "/help") {
+    const help = [
+      "コマンド一覧",
+      "",
+      "全員OK",
+      "/ai <内容>  -AIと会話-",
+      "/mycoin  -自分のコイン数-",
+      "/myrank  -自分の順位-",
+      "",
+      "管理者のみ",
+      "/give coin <数> @メンション  -コイン付与-",
+      "/rank  -発言回数ランキング-",
+      "/rank coin  -コイン所持数ランキング-",
+      "/uid @メンション  -ID取得(Discord送信)-",
+      "/admins  -管理者一覧-",
+      "/resetrank  -発言回数リセット-",
+      "/offbot @メンション  -AI無効化-",
+      "/onbot @メンション  -AI有効化-",
+      "",
+      "adminのみ",
+      "/adminoffbot @メンション  -強制無効化-",
+      "/adminonbot @メンション  -強制無効化解除-"
+    ].join("\n")
+    await replyText(event, help)
+    return true
+  }
 
   const aiMatch = trimmed.match(/^\/ai\s+([\s\S]+)/i)
   if (aiMatch) {
@@ -500,11 +588,7 @@ async function handleUserCommands(event, text) {
       await replyText(event, result.text)
       return true
     } catch (e) {
-      console.error("ai error:", e)
-      if (e?.response) {
-        console.error("ai error status:", e.response.status)
-        console.error("ai error data:", JSON.stringify(e.response.data))
-      }
+      logError("ai_error", e, { userId: event?.source?.userId })
       if (isQuotaError(e)) {
         await replyText(event, "APIの制限に到達しました。時間をおいて再度お試しください。")
       } else {
@@ -514,48 +598,23 @@ async function handleUserCommands(event, text) {
     }
   }
 
-  const imgMatch = trimmed.match(/^\/img\s+([\s\S]+)/i)
-  if (imgMatch) {
-    const prompt = imgMatch[1].trim()
-    if (!prompt) {
-      await replyText(event, "画像の内容を入れてください。例：/img 赤いスニーカー")
-      return true
-    }
-
-    try {
-      const quota = await consumeDailyQuota(event.source.userId, "image", DAILY_LIMIT_IMAGE)
-      if (!quota.ok) {
-        await replyText(event, `本日の画像生成上限に達しました。（上限：${quota.limit}）`)
-        return true
-      }
-      const result = await generateImage(prompt)
-      if (!result.ok) {
-        await replyText(event, result.error)
-        return true
-      }
-      await sendDiscord(`IMG\nPrompt: ${prompt}`)
-      await sendDiscordFile(result.buffer, "imagen.png", `IMAGE\nPrompt: ${prompt}`)
-      await replyText(event, "画像を生成しました。")
-      return true
-    } catch (e) {
-      console.error("img error:", e)
-      if (e?.response) {
-        console.error("img error status:", e.response.status)
-        console.error("img error data:", JSON.stringify(e.response.data))
-      }
-      if (isQuotaError(e)) {
-        await replyText(event, "APIの制限に到達しました。時間をおいて再度お試しください。")
-      } else {
-        await replyText(event, "画像生成に失敗しました。")
-      }
-      return true
-    }
-  }
-
   if (trimmed === "/mycoin") {
     const userId = event.source.userId
     const coins = await getCoins(userId)
     await replyText(event, `所持コイン：${coins}`)
+    return true
+  }
+
+  if (trimmed === "/myrank") {
+    const userId = event.source.userId
+    const rankMsg = await getUserRank(userId, "messages")
+    const rankCoin = await getUserRank(userId, "coins")
+    const msg = [
+      "あなたの順位",
+      `発言回数：${rankMsg ?? "-"}位`,
+      `コイン：${rankCoin ?? "-"}位`
+    ].join("\n")
+    await replyText(event, msg)
     return true
   }
 
@@ -646,6 +705,87 @@ async function handleAdminCommands(event, text) {
     return true
   }
 
+  const offMatch = trimmed.match(/^\/offbot\b/i)
+  if (offMatch) {
+    const mentioned = getMentionedUserIds(event)
+    if (mentioned.length === 0) {
+      await replyText(event, "メンションされたユーザーが見つかりません。")
+      return true
+    }
+    if (isAdmin(mentioned[0])) {
+      await replyText(event, "管理者は対象外です。")
+      return true
+    }
+    const targetState = await isBotMuted(mentioned[0])
+    if (targetState.muted && targetState.mode === "admin") {
+      await replyText(event, "このユーザーはadminoffbot中です。adminonbotで解除してください。")
+      return true
+    }
+    await setBotMuted(mentioned[0], true, "normal")
+    await replyText(event, "AIを無効化しました。")
+    return true
+  }
+
+  const onMatch = trimmed.match(/^\/onbot\b/i)
+  if (onMatch) {
+    const mentioned = getMentionedUserIds(event)
+    if (mentioned.length === 0) {
+      await replyText(event, "メンションされたユーザーが見つかりません。")
+      return true
+    }
+    const targetState = await isBotMuted(mentioned[0])
+    if (targetState.muted && targetState.mode === "admin") {
+      await replyText(event, "このユーザーはadminoffbot中です。adminonbotで解除してください。")
+      return true
+    }
+    await setBotMuted(mentioned[0], false)
+    await replyText(event, "AIを有効化しました。")
+    return true
+  }
+
+  const adminOffMatch = trimmed.match(/^\/adminoffbot\b/i)
+  if (adminOffMatch) {
+    if (!canAdminOffbot(userId)) {
+      await replyText(event, "権限がありません。")
+      return true
+    }
+    const mentioned = getMentionedUserIds(event)
+    if (mentioned.length === 0) {
+      await replyText(event, "メンションされたユーザーが見つかりません。")
+      return true
+    }
+    await setBotMuted(mentioned[0], true, "admin")
+    await replyText(event, "adminoffbot を設定しました。")
+    return true
+  }
+
+  const adminOnMatch = trimmed.match(/^\/adminonbot\b/i)
+  if (adminOnMatch) {
+    if (!canAdminOffbot(userId)) {
+      await replyText(event, "権限がありません。")
+      return true
+    }
+    const mentioned = getMentionedUserIds(event)
+    if (mentioned.length === 0) {
+      await replyText(event, "メンションされたユーザーが見つかりません。")
+      return true
+    }
+    const targetState = await isBotMuted(mentioned[0])
+    if (!targetState.muted || targetState.mode !== "admin") {
+      await replyText(event, "adminoffbot が設定されていません。")
+      return true
+    }
+    await setBotMuted(mentioned[0], false)
+    await replyText(event, "adminoffbot を解除しました。")
+    return true
+  }
+
+  if (trimmed === "/resetrank") {
+    await dbRun("UPDATE users SET messages = 0")
+    await replyText(event, "発言回数ランキングをリセットしました。")
+    return true
+  }
+
   if (trimmed === "/admins") {
     const ids = Array.from(new Set(ADMIN_IDS)).filter(Boolean)
     if (ids.length === 0) {
@@ -676,6 +816,31 @@ async function buildRankText(key, title) {
   return `${title}\n${lines.join("\n")}`
 }
 // ===== 起動 =====
-app.listen(process.env.PORT, () => {
-  console.log(`Bot running on port ${process.env.PORT}`)
+async function initDb() {
+  await dbRun(
+    "CREATE TABLE IF NOT EXISTS users (user_id TEXT PRIMARY KEY, coins INTEGER NOT NULL DEFAULT 0, messages INTEGER NOT NULL DEFAULT 0)"
+  )
+  await dbRun(
+    "CREATE TABLE IF NOT EXISTS daily_usage (user_id TEXT NOT NULL, date TEXT NOT NULL, kind TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(user_id, date, kind))"
+  )
+}
+
+initDb()
+  .then(() => {
+    app.listen(process.env.PORT, () => {
+      console.log(`Bot running on port ${process.env.PORT}`)
+    })
+  })
+  .catch((e) => {
+    logError("db_init_error", e)
+    process.exit(1)
+  })
+
+process.on("unhandledRejection", (err) => {
+  logError("unhandled_rejection", err)
+})
+
+process.on("uncaughtException", (err) => {
+  logError("uncaught_exception", err)
+  process.exit(1)
 })
