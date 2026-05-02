@@ -91,6 +91,32 @@ function logError(label, err, meta = {}) {
   console.error(safeStringify({ ...base, ...meta }))
 }
 
+// ===== LINE返信 =====
+async function replyText(event, text) {
+  try {
+    await lineClient.replyMessage(event.replyToken, {
+      type: "text",
+      text
+    })
+  } catch (e) {
+    logError("reply_error", e)
+  }
+}
+
+// ===== ランキングテキスト生成 =====
+async function buildRankText(key, title) {
+  const rows = await getRank(key)
+  if (!rows || rows.length === 0) return `${title}\nデータがありません。`
+
+  let text = `${title}\n`
+  rows.forEach((r, i) => {
+    text += `${i + 1}位：${r.user_id}（${r.value}）\n`
+  })
+  return text
+}
+
+
+
 // ===== Express =====
 const app = express()
 
