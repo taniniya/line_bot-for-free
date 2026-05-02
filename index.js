@@ -396,12 +396,12 @@ async function handleUserCommands(event, text) {
   // ===== /tenki =====
   if (trimmed === "/tenki") {
     try {
-      const url = "https://www.jma.go.jp/bosai/forecast/data/forecast/120000.json"
+      const url = "https://www.jma.go.jp/bosai/forecast/data/forecast/130010.json"
       const res = await axios.get(url)
       const area = res.data[0].timeSeries[0]
   
-      // 木更津（富津市を含む）
-      const idx = area.areas.findIndex(a => a.area.code === "120020")
+      
+      const idx = area.areas.findIndex(a => a.area.code === "130010")
       if (idx === -1) {
         await replyText(event, "天気情報を取得できませんでした。")
         return true
@@ -412,7 +412,7 @@ async function handleUserCommands(event, text) {
       const temps = res.data[0].timeSeries[2].areas[idx].temps[0] // 気温
   
       const msg =
-  `🌤 富津市の天気
+  `🌤 東京の天気
   天気：${weather}
   気温：${temps}℃
   降水確率：${pops}%`
@@ -469,7 +469,7 @@ async function handleUserCommands(event, text) {
       "/mycoin  -自分のコイン数-",
       "/myrank  -自分の順位-",
       "/login  -ログインボーナス-",
-      "/tenki  -富津市の天気-",
+      "/tenki  -天気-",
       "/omikuzi  -おみくじ-",
       "",
       "管理者のみ",
