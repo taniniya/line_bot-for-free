@@ -399,17 +399,21 @@ async function replyText(event, text) {
   }
 }
 
-// ===== ランキングテキスト生成（修正版） =====
+// ===== ランキングテキスト生成（名前対応版） =====
 async function buildRankText(key, title) {
   const rows = await getRank(key)
   let text = `🏆 ${title}\n\n`
 
-  rows.forEach((row, i) => {
-    text += `${i + 1}位: ${row.user_id} - ${row.value} ${key === "coins" ? "コイン" : "回"}\n`
-  })
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i]
+    const name = await getProfile(row.user_id)   // ← ここで名前取得！
+
+    text += `${i + 1}位: ${name} - ${row.value} ${key === "coins" ? "コイン" : "回"}\n`
+  }
 
   return text
 }
+
 // ===== User Commands =====
 async function handleUserCommands(event, text) {
   const trimmed = text.trim()
