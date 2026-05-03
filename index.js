@@ -504,7 +504,6 @@ async function handleUserCommands(event, text) {
       "/tenki  -天気-",
       "/omikuzi  -おみくじ-",
       "/rob @ユーザー  -そのユーザーのコインを盗む-",
-      "/rank coints  -コインランキング-",
       "/coints <表/裏> <金額 or all>  -コイントスギャンブル-",
       "/pay <金額> @メンション  -コイン送金-",
       "",
