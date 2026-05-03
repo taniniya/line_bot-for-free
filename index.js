@@ -486,30 +486,18 @@ async function handleUserCommands(event, text) {
         iconBase64 = Buffer.from(iconRes.data).toString("base64")
       }
 
-      const svg = `
-        <svg width="900" height="450" xmlns="http://www.w3.org/2000/svg">
-          <defs>
-            <clipPath id="avatarClip">
-              <circle cx="100" cy="100" r="60" />
-            </clipPath>
-          </defs>
+      const svg =
+　　　`<svg width="900" height="450" xmlns="http://www.w3.org/2000/svg">
+　　　<defs><clipPath id="avatarClip"><circle cx="100" cy="100" r="60"/></clipPath></defs>
+　　　<rect width="100%" height="100%" fill="#000000"/>
+　　　<rect x="40" y="40" width="820" height="370" rx="24" ry="24" fill="#1a1a1a"/>
+　　　<g clip-path="url(#avatarClip)">
+　　　<image href="data:image/png;base64,${iconBase64}" x="60" y="60" width="120" height="120"/>
+　　　</g>
+　　　<text x="200" y="120" font-size="36" fill="#ffffff" font-weight="bold">${profile.name}</text>
+　　　<text x="80" y="220" font-size="30" fill="#e6e6e6">${bodyText}</text>
+　　　</svg>`;
 
-          <rect width="100%" height="100%" fill="#000000"/>
-          <rect x="40" y="40" width="820" height="370" rx="24" ry="24" fill="#1a1a1a" />
-
-          <g clip-path="url(#avatarClip)">
-            <image href="data:image/png;base64,${iconBase64}" x="60" y="60" width="120" height="120" />
-          </g>
-
-          <text x="200" y="120" font-size="36" fill="#ffffff" font-weight="bold">
-            ${profile.name}
-          </text>
-
-          <text x="80" y="220" font-size="30" fill="#e6e6e6">
-            ${bodyText}
-          </text>
-        </svg>
-      `
 
       const buffer = await sharp(Buffer.from(svg)).png().toBuffer()
       const imageUrl = await sendDiscordFile(buffer, "quote.png", "QUOTE IMAGE")
