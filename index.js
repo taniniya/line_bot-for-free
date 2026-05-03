@@ -1,5 +1,6 @@
 ﻿require("dotenv").config()
 
+const express = require("express")
 const line = require("@line/bot-sdk")
 const axios = require("axios")
 const FormData = require("form-data")
@@ -9,15 +10,9 @@ const path = require("path")
 const { Pool } = require("pg")
 const ffmpeg = require("fluent-ffmpeg")
 const ffmpegPath = require("ffmpeg-static")
-const express = require("express")
-const line = require("@line/bot-sdk")
-const axios = require("axios")
-const FormData = require("form-data")
-const sharp = require("sharp")
-const fs = require("fs")
-const path = require("path")
 
 ffmpeg.setFfmpegPath(ffmpegPath)
+
 
 const MAX_SIZE = 8 * 1024 * 1024
 const handledEvents = new Set()
