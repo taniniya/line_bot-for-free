@@ -411,6 +411,14 @@ async function replyText(event, text) {
   }
 }
 
+// ===== ランキングテキスト生成 =====
+function buildRankText(rows) {
+  let text = "🏆 ランキング\n\n"
+  rows.forEach((row, i) => {
+    text += `${i + 1}位: ${row.user_id} - ${row.coin} コイン\n`
+  })
+  return text
+}
 
 
 
