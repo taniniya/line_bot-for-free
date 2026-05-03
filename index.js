@@ -119,8 +119,6 @@ if (!fs.existsSync(STATIC_DIR)) {
 // ===== Express =====
 const app = express()
 
-const app = express()
-
 // /static/xxx.png で画像を配信
 app.use("/static", express.static(STATIC_DIR))
 
