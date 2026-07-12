@@ -345,9 +345,21 @@ app.get("/health", (req, res) => {
   res.status(200).send("ok");
 });
 
+
 // ===== Webhook =====
 
-app.post("/webhook", line.middleware(lineConfig), (req, res) => {
+
+app.post("/webhook", (req, res, next) => {
+  const signature = req.headers["x-line-signature"];
+
+
+  if (!signature) {
+    return res.status(200).send("ok");
+  }
+
+
+  next();
+}, line.middleware(lineConfig), (req, res) => {
   res.sendStatus(200);
 
   (async () => {
@@ -390,6 +402,7 @@ app.post("/webhook", line.middleware(lineConfig), (req, res) => {
     }
   })();
 });
+
 
 app.use(express.json());
 
