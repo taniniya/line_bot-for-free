@@ -34,6 +34,7 @@ const PGUSER = process.env.PGUSER || ""
 const PGPASSWORD = process.env.PGPASSWORD || ""
 const PGSSL =
   process.env.PGSSL === "true" || /sslmode=require/i.test(DATABASE_URL)
+const AUTH_COOKIE_NAME = "tanishi_auth"
 
 // ===== Admin =====
 const ADMIN_IDS = [
@@ -129,6 +130,62 @@ async function initDb() {
       linked_at TIMESTAMPTZ
     )
   `)
+  await dbRun(`
+    CREATE TABLE IF NOT EXISTS site_users (
+      id TEXT PRIMARY KEY,
+      username TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      linked_line_user_id TEXT UNIQUE,
+      linked_account_id TEXT UNIQUE
+    )
+  `)
+  await dbRun(`
+    CREATE TABLE IF NOT EXISTS site_sessions (
+      token TEXT PRIMARY KEY,
+      site_user_id TEXT NOT NULL REFERENCES site_users(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      expires_at TIMESTAMPTZ NOT NULL
+    )
+  `)
+}
+
+function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
+  const derived = crypto.scryptSync(password, salt, 64).toString("hex")
+  return `${salt}:${derived}`
+}
+
+function verifyPassword(password, storedHash) {
+  const [salt, hash] = String(storedHash || "").split(":")
+  if (!salt || !hash) return false
+  const derived = crypto.scryptSync(password, salt, 64).toString("hex")
+  return crypto.timingSafeEqual(Buffer.from(hash, "hex"), Buffer.from(derived, "hex"))
+}
+
+function setAuthCookie(res, token) {
+  res.cookie(AUTH_COOKIE_NAME, token, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    maxAge: 1000 * 60 * 60 * 24 * 30
+  })
+}
+
+function clearAuthCookie(res) {
+  res.clearCookie(AUTH_COOKIE_NAME)
+}
+
+function getCookie(req, name) {
+  const header = req.headers.cookie || ""
+  const cookies = header.split(";").map((part) => part.trim())
+  for (const entry of cookies) {
+    const index = entry.indexOf("=")
+    if (index < 0) continue
+    const key = entry.slice(0, index)
+    const value = entry.slice(index + 1)
+    if (key === name) return decodeURIComponent(value)
+  }
+  return null
 }
 
 function safeStringify(obj) {
@@ -175,6 +232,7 @@ if (!fs.existsSync(STATIC_DIR)) {
 // ===== Express =====
 const app = express()
 app.use("/static", express.static(STATIC_DIR))
+app.use(express.json())
 app.get("/", (_req, res) => {
   res.sendFile(path.join(STATIC_DIR, "dashboard.html"))
 })
@@ -190,9 +248,10 @@ app.get("/api/dashboard", async (_req, res) => {
     res.status(500).json({ error: "failed_to_build_dashboard" })
   }
 })
-app.post("/api/site-accounts", express.json(), async (_req, res) => {
+app.post("/api/site-accounts", async (_req, res) => {
   try {
-    const account = await createSiteAccount()
+    const session = await getSessionFromRequest(_req)
+    const account = await createSiteAccount(session?.site_user_id || null)
     res.json(account)
   } catch (e) {
     logError("site_account_create_error", e)
@@ -210,6 +269,73 @@ app.get("/api/site-accounts/:code", async (req, res) => {
   } catch (e) {
     logError("site_account_lookup_error", e)
     res.status(500).json({ error: "failed_to_lookup_account" })
+  }
+})
+app.post("/api/auth/register", async (req, res) => {
+  try {
+    const username = String(req.body?.username || "").trim()
+    const password = String(req.body?.password || "")
+    if (!username || !password) {
+      res.status(400).json({ error: "username_and_password_required" })
+      return
+    }
+
+    const result = await registerSiteUser(username, password)
+    if (!result.ok) {
+      res.status(400).json({ error: result.message })
+      return
+    }
+
+    setAuthCookie(res, result.token)
+    res.json({ ok: true, user: result.user })
+  } catch (e) {
+    logError("auth_register_error", e)
+    res.status(500).json({ error: "failed_to_register" })
+  }
+})
+app.post("/api/auth/login", async (req, res) => {
+  try {
+    const username = String(req.body?.username || "").trim()
+    const password = String(req.body?.password || "")
+    if (!username || !password) {
+      res.status(400).json({ error: "username_and_password_required" })
+      return
+    }
+
+    const result = await loginSiteUser(username, password)
+    if (!result.ok) {
+      res.status(401).json({ error: result.message })
+      return
+    }
+
+    setAuthCookie(res, result.token)
+    res.json({ ok: true, user: result.user })
+  } catch (e) {
+    logError("auth_login_error", e)
+    res.status(500).json({ error: "failed_to_login" })
+  }
+})
+app.post("/api/auth/logout", async (_req, res) => {
+  clearAuthCookie(res)
+  res.json({ ok: true })
+})
+app.get("/api/auth/me", async (req, res) => {
+  try {
+    const session = await getSessionFromRequest(req)
+    if (!session) {
+      res.json({ authenticated: false })
+      return
+    }
+    const user = await getSiteUserById(session.site_user_id)
+    if (!user) {
+      clearAuthCookie(res)
+      res.json({ authenticated: false })
+      return
+    }
+    res.json({ authenticated: true, user })
+  } catch (e) {
+    logError("auth_me_error", e)
+    res.status(500).json({ error: "failed_to_load_session" })
   }
 })
 // ===== Webhook =====
@@ -808,7 +934,7 @@ async function handleUserCommands(event, text) {
       return true
     }
 
-    await replyText(event, `連携しました。\nアカウントID: ${result.accountId}`)
+    await replyText(event, `連携できました。\nアカウントID: ${result.accountId}`)
     return true
   }
 
@@ -1255,7 +1381,7 @@ async function countLinkedAccounts() {
   return row?.count ?? 0
 }
 
-async function createSiteAccount() {
+async function createSiteAccount(siteUserId = null) {
   const accountId = crypto.randomUUID()
   const code = crypto.randomBytes(3).toString("hex").toUpperCase()
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000)
@@ -1265,6 +1391,15 @@ async function createSiteAccount() {
      VALUES ($1, $2, $3)`,
     [accountId, code, expiresAt]
   )
+
+  if (siteUserId) {
+    await dbRun(
+      `UPDATE site_users
+       SET linked_account_id = $1
+       WHERE id = $2`,
+      [accountId, siteUserId]
+    )
+  }
 
   return { accountId, code, expiresAt: expiresAt.toISOString() }
 }
@@ -1286,7 +1421,93 @@ async function getSiteAccountByCode(code) {
   }
 }
 
-async function linkSiteAccount(lineUserId, code) {
+async function registerSiteUser(username, password) {
+  const existing = await dbGet(
+    "SELECT id FROM site_users WHERE username = $1",
+    [username.toLowerCase()]
+  )
+  if (existing) {
+    return { ok: false, message: "そのユーザー名はすでに使われています。" }
+  }
+
+  const userId = crypto.randomUUID()
+  const token = crypto.randomBytes(32).toString("hex")
+  const passwordHash = hashPassword(password)
+  const expiresAt = new Date(Date.now() + 1000 * 60 * 60 * 24 * 30)
+
+  await dbRun(
+    `INSERT INTO site_users (id, username, password_hash)
+     VALUES ($1, $2, $3)`,
+    [userId, username.toLowerCase(), passwordHash]
+  )
+  await dbRun(
+    `INSERT INTO site_sessions (token, site_user_id, expires_at)
+     VALUES ($1, $2, $3)`,
+    [token, userId, expiresAt]
+  )
+
+  return {
+    ok: true,
+    token,
+    user: { id: userId, username: username.toLowerCase(), linkedLineUserId: null }
+  }
+}
+
+async function loginSiteUser(username, password) {
+  const user = await dbGet(
+    "SELECT id, username, password_hash, linked_line_user_id FROM site_users WHERE username = $1",
+    [username.toLowerCase()]
+  )
+  if (!user || !verifyPassword(password, user.password_hash)) {
+    return { ok: false, message: "ユーザー名またはパスワードが違います。" }
+  }
+
+  const token = crypto.randomBytes(32).toString("hex")
+  const expiresAt = new Date(Date.now() + 1000 * 60 * 60 * 24 * 30)
+  await dbRun(
+    `INSERT INTO site_sessions (token, site_user_id, expires_at)
+     VALUES ($1, $2, $3)`,
+    [token, user.id, expiresAt]
+  )
+
+  return {
+    ok: true,
+    token,
+    user: { id: user.id, username: user.username, linkedLineUserId: user.linked_line_user_id }
+  }
+}
+
+async function getSessionFromRequest(req) {
+  const token = getCookie(req, AUTH_COOKIE_NAME)
+  if (!token) return null
+  const session = await dbGet(
+    "SELECT token, site_user_id, expires_at FROM site_sessions WHERE token = $1",
+    [token]
+  )
+  if (!session) return null
+  if (new Date(session.expires_at).getTime() < Date.now()) {
+    await dbRun("DELETE FROM site_sessions WHERE token = $1", [token])
+    return null
+  }
+  return session
+}
+
+async function getSiteUserById(userId) {
+  const user = await dbGet(
+    "SELECT id, username, created_at, linked_line_user_id, linked_account_id FROM site_users WHERE id = $1",
+    [userId]
+  )
+  if (!user) return null
+  return {
+    id: user.id,
+    username: user.username,
+    createdAt: user.created_at,
+    linkedLineUserId: user.linked_line_user_id,
+    linkedAccountId: user.linked_account_id
+  }
+}
+
+async function linkSiteAccount(lineUserId, code, siteUserId = null) {
   await ensureUser(lineUserId)
   const row = await dbGet(
     `SELECT account_id, link_code_expires_at, line_user_id
@@ -1313,6 +1534,15 @@ async function linkSiteAccount(lineUserId, code) {
      WHERE account_id = $2`,
     [lineUserId, row.account_id]
   )
+
+  if (siteUserId) {
+    await dbRun(
+      `UPDATE site_users
+       SET linked_line_user_id = $1, linked_account_id = $2
+       WHERE id = $3`,
+      [lineUserId, row.account_id, siteUserId]
+    )
+  }
 
   return { ok: true, accountId: row.account_id }
 }

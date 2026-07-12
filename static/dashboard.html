@@ -3,12 +3,12 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>LINE Bot Site</title>
+  <title>TANISHI Bot</title>
   <style>
     :root {
-      --bg: #ffffff;
-      --text: #111111;
-      --muted: #666666;
+      --bg: #fff;
+      --text: #111;
+      --muted: #666;
       --line: #e5e5e5;
       --soft: #f7f7f7;
     }
@@ -23,13 +23,13 @@
     .wrap { max-width: 1120px; margin: 0 auto; padding: 40px 20px 56px; }
     header {
       display: flex; justify-content: space-between; gap: 16px; align-items: end;
-      border-bottom: 1px solid var(--line); padding-bottom: 18px; margin-bottom: 28px;
+      border-bottom: 1px solid var(--line); padding-bottom: 18px; margin-bottom: 24px;
     }
-    h1 { margin: 0; font-size: clamp(2rem, 4vw, 3.25rem); letter-spacing: -0.04em; font-weight: 700; }
-    .sub { margin-top: 8px; color: var(--muted); font-size: 0.98rem; }
-    .badge, .code-box {
+    h1 { margin: 0; font-size: clamp(2rem, 4vw, 3.2rem); letter-spacing: -0.04em; }
+    .sub { margin-top: 8px; color: var(--muted); }
+    .badge {
       border: 1px solid var(--line); border-radius: 999px; padding: 10px 14px;
-      color: var(--muted); background: var(--soft); white-space: nowrap;
+      color: var(--muted); background: var(--soft);
     }
     .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px; }
     .card {
@@ -37,28 +37,33 @@
       padding: 18px; background: #fff;
     }
     .half { grid-column: span 6; }
-    h2 { margin: 0 0 14px; font-size: 1.05rem; font-weight: 700; letter-spacing: -0.02em; }
+    h2 { margin: 0 0 14px; font-size: 1.05rem; }
+    .row { display: grid; gap: 10px; }
     .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
     .stat {
       background: var(--soft); border: 1px solid var(--line); border-radius: 14px; padding: 16px;
     }
-    .stat .label { color: var(--muted); font-size: 0.88rem; }
-    .stat .value { margin-top: 8px; font-size: 1.6rem; font-weight: 700; }
-    table { width: 100%; border-collapse: collapse; font-size: 0.96rem; }
-    th, td { text-align: left; padding: 11px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    .label { color: var(--muted); font-size: .88rem; }
+    .value { margin-top: 8px; font-size: 1.5rem; font-weight: 700; }
+    table { width: 100%; border-collapse: collapse; font-size: .96rem; }
+    th, td { text-align: left; padding: 11px 8px; border-bottom: 1px solid var(--line); }
     th { color: var(--muted); font-weight: 600; }
-    .empty { color: var(--muted); padding: 12px 0; }
-    .actions { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+    input {
+      border: 1px solid var(--line); border-radius: 12px; padding: 11px 12px;
+      font: inherit; min-width: 220px; background: #fff;
+    }
     button {
       border: 1px solid #111; background: #111; color: #fff; border-radius: 999px;
       padding: 11px 16px; cursor: pointer; font: inherit;
     }
-    button:hover { opacity: 0.9; }
-    .helper { color: var(--muted); font-size: 0.92rem; }
-    .create-result {
-      margin-top: 12px; display: grid; gap: 8px;
-      padding: 14px; border: 1px solid var(--line); border-radius: 14px; background: var(--soft);
+    button.secondary { background: #fff; color: #111; }
+    .helper { color: var(--muted); font-size: .92rem; }
+    .box {
+      background: var(--soft); border: 1px solid var(--line); border-radius: 14px; padding: 14px;
+      display: grid; gap: 8px;
     }
+    .code { font-size: 1.5rem; font-weight: 800; letter-spacing: .08em; }
     @media (max-width: 900px) {
       .half { grid-column: span 12; }
       .stats { grid-template-columns: 1fr 1fr; }
@@ -66,6 +71,7 @@
     }
     @media (max-width: 640px) {
       .stats { grid-template-columns: 1fr; }
+      input { min-width: 0; width: 100%; }
     }
   </style>
 </head>
@@ -74,19 +80,31 @@
     <header>
       <div>
         <h1>TANISHI Bot</h1>
-        <div class="sub">タニシbotダッシュボード</div>
+        <div class="sub">サイトログインとLINE連携をひとまとめにしました。</div>
       </div>
       <div class="badge" id="updatedAt">loading...</div>
     </header>
 
     <section class="grid">
       <div class="card">
-        <h2>Account Linking</h2>
+        <h2>Site Login</h2>
         <div class="actions">
-          <button id="createAccount">アカウントを作る</button>
-          <div class="helper">作成したコードを LINE で <code>/link コード</code> と送って連携します。</div>
+          <input id="username" placeholder="Username" autocomplete="username" />
+          <input id="password" type="password" placeholder="Password" autocomplete="current-password" />
+          <button id="registerBtn">Register</button>
+          <button id="loginBtn" class="secondary">Login</button>
+          <button id="logoutBtn" class="secondary">Logout</button>
         </div>
-        <div id="accountResult" class="create-result" style="display:none;"></div>
+        <div class="helper" id="authStatus">Not signed in.</div>
+      </div>
+
+      <div class="card">
+        <h2>LINE Linking</h2>
+        <div class="actions">
+          <button id="createAccountBtn">Create Link Code</button>
+          <div class="helper">LINEで <code>/link CODE</code> を送ると連携できます。</div>
+        </div>
+        <div id="linkBox" class="box" style="display:none;"></div>
       </div>
 
       <div class="card">
@@ -113,54 +131,99 @@
 
   <script>
     const dateFormatter = new Intl.DateTimeFormat("ja-JP", { dateStyle: "medium", timeStyle: "medium" });
+    let currentUser = null;
 
     function renderRows(items, columns) {
-      if (!items.length) return `<tr><td class="empty" colspan="${columns.length}">データがありません</td></tr>`;
+      if (!items.length) return `<tr><td colspan="${columns.length}">データがありません</td></tr>`;
       return items.map((item) => `<tr>${columns.map((key) => `<td>${item[key] ?? "-"}</td>`).join("")}</tr>`).join("");
     }
 
-    async function loadDashboard() {
-      const response = await fetch("/api/dashboard");
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "failed_to_load");
+    async function api(path, options = {}) {
+      const response = await fetch(path, {
+        headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+        ...options
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || "request_failed");
+      return data;
+    }
 
+    async function refreshMe() {
+      const data = await api("/api/auth/me");
+      currentUser = data.authenticated ? data.user : null;
+      document.getElementById("authStatus").textContent = currentUser
+        ? `Signed in as ${currentUser.username}${currentUser.linkedLineUserId ? " | LINE linked" : ""}`
+        : "Not signed in.";
+    }
+
+    async function loadDashboard() {
+      const data = await api("/api/dashboard");
       document.getElementById("updatedAt").textContent = `Updated ${dateFormatter.format(new Date(data.updatedAt))}`;
       document.getElementById("stats").innerHTML = [
         { label: "Coin Leaders", value: data.coinRank.length },
         { label: "Message Leaders", value: data.messageRank.length },
         { label: "Tracked Users", value: data.topUsers.length },
-        { label: "Linked Accounts", value: data.linkedAccounts ?? "-" }
-      ].map((item) => `
-        <div class="stat">
-          <div class="label">${item.label}</div>
-          <div class="value">${item.value}</div>
-        </div>
-      `).join("");
+        { label: "Linked Accounts", value: data.linkedAccounts ?? 0 }
+      ].map((item) => `<div class="stat"><div class="label">${item.label}</div><div class="value">${item.value}</div></div>`).join("");
       document.getElementById("coinRank").innerHTML = renderRows(data.coinRank, ["rank", "name", "value"]);
       document.getElementById("messageRank").innerHTML = renderRows(data.messageRank, ["rank", "name", "value"]);
       document.getElementById("topUsers").innerHTML = renderRows(data.topUsers, ["rank", "name", "coins", "messages", "userId"]);
     }
 
-    async function createAccount() {
-      const response = await fetch("/api/site-accounts", { method: "POST" });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "failed_to_create");
-
-      const box = document.getElementById("accountResult");
-      box.style.display = "grid";
-      box.innerHTML = `
-        <div><strong>Account ID</strong><br>${data.accountId}</div>
-        <div><strong>Link Code</strong><br><span class="code-box">${data.code}</span></div>
-        <div><strong>Expires</strong><br>${dateFormatter.format(new Date(data.expiresAt))}</div>
-        <div class="helper">LINEで <code>/link ${data.code}</code> を送って連携してください。</div>
-      `;
+    async function register() {
+      const username = document.getElementById("username").value.trim();
+      const password = document.getElementById("password").value;
+      await api("/api/auth/register", {
+        method: "POST",
+        body: JSON.stringify({ username, password })
+      });
+      await refreshMe();
     }
 
-    document.getElementById("createAccount").addEventListener("click", () => {
-      createAccount().catch((error) => alert(error.message));
+    async function login() {
+      const username = document.getElementById("username").value.trim();
+      const password = document.getElementById("password").value;
+      await api("/api/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ username, password })
+      });
+      await refreshMe();
+    }
+
+    async function logout() {
+      await api("/api/auth/logout", { method: "POST" });
+      await refreshMe();
+    }
+
+    async function createLinkCode() {
+      const data = await api("/api/site-accounts", { method: "POST" });
+      const box = document.getElementById("linkBox");
+      box.style.display = "grid";
+      box.innerHTML = `
+        <div><strong>Account ID</strong><div>${data.accountId}</div></div>
+        <div><strong>Link Code</strong><div class="code">${data.code}</div></div>
+        <div><strong>Expires</strong><div>${dateFormatter.format(new Date(data.expiresAt))}</div></div>
+        <div class="helper">${currentUser ? "Logged-in account is ready for LINE linking." : "Sign in first if you want this saved to your site account."}</div>
+      `;
+      if (currentUser) {
+        await refreshMe();
+      }
+    }
+
+    document.getElementById("registerBtn").addEventListener("click", () => {
+      register().catch((error) => alert(error.message));
+    });
+    document.getElementById("loginBtn").addEventListener("click", () => {
+      login().catch((error) => alert(error.message));
+    });
+    document.getElementById("logoutBtn").addEventListener("click", () => {
+      logout().catch((error) => alert(error.message));
+    });
+    document.getElementById("createAccountBtn").addEventListener("click", () => {
+      createLinkCode().catch((error) => alert(error.message));
     });
 
-    loadDashboard().catch((error) => {
+    Promise.all([refreshMe(), loadDashboard()]).catch((error) => {
       document.getElementById("updatedAt").textContent = "load failed";
       document.body.insertAdjacentHTML("beforeend", `<pre style="padding:20px;color:#b00020;">${error.message}</pre>`);
     });
