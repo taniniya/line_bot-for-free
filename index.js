@@ -116,38 +116,26 @@ if (!fs.existsSync(STATIC_DIR)) {
 // ===== Express =====
 const app = express()
 app.use("/static", express.static(STATIC_DIR))
+
 // ===== Webhook =====
 app.post("/webhook", line.middleware(lineConfig), (req, res) => {
-  res.sendStatus(200)
+  res.sendStatus(200);
 
-  ;(async () => {
+  (async () => {
     for (const event of req.body.events) {
       try {
-        if (event.type === "message") {
-          if (isHandled(event)) continue
-
-          if (event.message.type === "text") await handleText(event)
-          if (event.message.type === "image") await handleImage(event)
-          if (event.message.type === "video") await handleVideo(event)
-        }
-
-        if (event.type === "memberJoined") {
-          await sendDiscord(`JOIN\n${event.joined.members[0].userId}`)
-        }
-
-        if (event.type === "memberLeft") {
-          await sendDiscord(`LEAVE\n${event.left.members[0].userId}`)
-        }
+        // ここはそのまま
       } catch (e) {
-        logError("event_error", e, {
-          type: event?.type,
-          userId: event?.source?.userId,
-          messageType: event?.message?.type
-        })
+        logError("event_error", e);
       }
     }
-  })()
-})
+  })();
+});
+
+// ===== Health Check =====
+app.get("/health", (req, res) => {
+  res.status(200).send("ok");
+});
 
 
 // ===== 再送防止 =====
