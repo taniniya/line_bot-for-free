@@ -19,6 +19,7 @@ const MAX_SIZE = 8 * 1024 * 1024
 const handledEvents = new Set()
 const SLOT_BET_REGEX = /^\/slot(?:\s+([\s\S]+))?$/i
 const LINK_CODE_REGEX = /^\/link\s+([A-Za-z0-9]{6,12})$/i
+const DELINK_REGEX = /^\/delink\b/i
 
 const OPENROUTER_TEXT_MODEL =
   process.env.OPENROUTER_TEXT_MODEL || "openrouter/free"
@@ -339,7 +340,15 @@ app.get("/api/auth/me", async (req, res) => {
   }
 })
 // ===== Webhook =====
-app.post("/webhook", line.middleware(lineConfig), (req, res) => {
+app.post("/webhook", (req, res, next) => {
+  const signature = req.headers["x-line-signature"]
+  if (!signature) {
+    res.sendStatus(200)
+    return
+  }
+
+  line.middleware(lineConfig)(req, res, next)
+}, (req, res) => {
   res.sendStatus(200)
 
   ;(async () => {
@@ -837,6 +846,7 @@ async function handleUserCommands(event, text) {
       "/myrank  -自分の順位-",
       "/login <コード>  -ホームページ連携-",
       "/link <コード>  -ホームページ連携-",
+      "/delink  -連携解除とアカウント削除-",
       "/login  -ログインボーナス-",
       "/tenki  -天気-",
       "/omikuzi  -おみくじ-",
@@ -950,6 +960,18 @@ async function handleUserCommands(event, text) {
     }
 
     await replyText(event, `連携しました。\nアカウントID: ${result.accountId}`)
+    return true
+  }
+
+  // ===== /delink =====
+  if (DELINK_REGEX.test(trimmed)) {
+    const result = await delinkSiteAccount(event.source.userId)
+    if (!result.ok) {
+      await replyText(event, result.message)
+      return true
+    }
+
+    await replyText(event, "連携を解除してアカウントを削除しました。")
     return true
   }
 
@@ -1545,6 +1567,32 @@ async function linkSiteAccount(lineUserId, code, siteUserId = null) {
   }
 
   return { ok: true, accountId: row.account_id }
+}
+
+async function delinkSiteAccount(lineUserId) {
+  const account = await dbGet(
+    `SELECT account_id FROM site_accounts WHERE line_user_id = $1`,
+    [lineUserId]
+  )
+
+  if (!account) {
+    return { ok: false, message: "連携されていません。" }
+  }
+
+  const siteUser = await dbGet(
+    `SELECT id FROM site_users WHERE linked_line_user_id = $1`,
+    [lineUserId]
+  )
+
+  await dbRun(`DELETE FROM site_sessions WHERE site_user_id = $1`, [
+    siteUser?.id || null
+  ])
+  await dbRun(`DELETE FROM site_users WHERE linked_line_user_id = $1`, [
+    lineUserId
+  ])
+  await dbRun(`DELETE FROM site_accounts WHERE line_user_id = $1`, [lineUserId])
+
+  return { ok: true }
 }
 
 async function getUserRank(userId, key) {
