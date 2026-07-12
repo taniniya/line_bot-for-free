@@ -340,6 +340,11 @@ app.get("/api/auth/me", async (req, res) => {
   }
 })
 
+// ===== Health Check =====
+app.get("/health", (req, res) => {
+  res.status(200).send("ok");
+});
+
 // ===== Webhook =====
 
 app.post("/webhook", line.middleware(lineConfig), (req, res) => {
