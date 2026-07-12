@@ -339,46 +339,54 @@ app.get("/api/auth/me", async (req, res) => {
     res.status(500).json({ error: "failed_to_load_session" })
   }
 })
+
 // ===== Webhook =====
-app.post("/webhook", (req, res, next) => {
-  const signature = req.headers["x-line-signature"]
-  if (!signature) {
-    res.sendStatus(200)
-    return
-  }
 
-  line.middleware(lineConfig)(req, res, next)
-}, (req, res) => {
-  res.sendStatus(200)
+app.post("/webhook", line.middleware(lineConfig), (req, res) => {
+  res.sendStatus(200);
 
-  ;(async () => {
+  (async () => {
     for (const event of req.body.events) {
       try {
+        // ===== メッセージ =====
         if (event.type === "message") {
-          if (isHandled(event)) continue
+          if (isHandled(event)) continue;
 
-          if (event.message.type === "text") await handleText(event)
-          if (event.message.type === "image") await handleImage(event)
-          if (event.message.type === "video") await handleVideo(event)
+          if (event.message.type === "text") {
+            await handleText(event);
+          }
+
+          if (event.message.type === "image") {
+            await handleImage(event);
+          }
+
+          if (event.message.type === "video") {
+            await handleVideo(event);
+          }
         }
 
+        // ===== 参加 =====
         if (event.type === "memberJoined") {
-          await sendDiscord(`JOIN\n${event.joined.members[0].userId}`)
+          await sendDiscord(`JOIN\n${event.joined.members[0].userId}`);
         }
 
+        // ===== 退出 =====
         if (event.type === "memberLeft") {
-          await sendDiscord(`LEAVE\n${event.left.members[0].userId}`)
+          await sendDiscord(`LEAVE\n${event.left.members[0].userId}`);
         }
+
       } catch (e) {
         logError("event_error", e, {
           type: event?.type,
           userId: event?.source?.userId,
           messageType: event?.message?.type
-        })
+        });
       }
     }
-  })()
-})
+  })();
+});
+
+app.use(express.json());
 
 
 // ===== 再送防止 =====
