@@ -347,38 +347,29 @@ app.get("/health", (req, res) => {
 
 
 // ===== Webhook =====
-
-
-app.post("/webhook", (req, res, next) => {
-  const signature = req.headers["x-line-signature"];
-
-
-  if (!signature) {
-    return res.status(200).send("ok");
-  }
-
-
-  next();
-}, line.middleware(lineConfig), (req, res) => {
+// express.json() より前に置く（署名検証のため raw body が必要）
+app.post("/webhook", line.middleware(lineConfig), (req, res) => {
+  // LINE に即時応答（必須）
   res.sendStatus(200);
 
   (async () => {
     for (const event of req.body.events) {
       try {
+
         // ===== メッセージ =====
         if (event.type === "message") {
           if (isHandled(event)) continue;
 
-          if (event.message.type === "text") {
-            await handleText(event);
-          }
-
-          if (event.message.type === "image") {
-            await handleImage(event);
-          }
-
-          if (event.message.type === "video") {
-            await handleVideo(event);
+          switch (event.message.type) {
+            case "text":
+              await handleText(event);
+              break;
+            case "image":
+              await handleImage(event);
+              break;
+            case "video":
+              await handleVideo(event);
+              break;
           }
         }
 
@@ -403,8 +394,9 @@ app.post("/webhook", (req, res, next) => {
   })();
 });
 
-
+// Webhook の後ろに置く（ここが重要）
 app.use(express.json());
+
 
 
 // ===== 再送防止 =====
