@@ -7,6 +7,8 @@ const FormData = require("form-data")
 const sharp = require("sharp")
 const fs = require("fs")
 const path = require("path")
+const os = require("os")
+const crypto = require("crypto")
 const { Pool } = require("pg")
 const ffmpeg = require("fluent-ffmpeg")
 const ffmpegPath = require("ffmpeg-static")
@@ -15,6 +17,8 @@ ffmpeg.setFfmpegPath(ffmpegPath)
 
 const MAX_SIZE = 8 * 1024 * 1024
 const handledEvents = new Set()
+const SLOT_BET_REGEX = /^\/slot(?:\s+([\s\S]+))?$/i
+const LINK_CODE_REGEX = /^\/link\s+([A-Za-z0-9]{6,12})$/i
 
 const OPENROUTER_TEXT_MODEL =
   process.env.OPENROUTER_TEXT_MODEL || "openrouter/free"
@@ -23,6 +27,11 @@ const OPENROUTER_X_TITLE = process.env.OPENROUTER_X_TITLE || ""
 const DAILY_LIMIT_TEXT = Number(process.env.DAILY_LIMIT_TEXT || "20")
 const DAILY_LIMIT_IMAGE = Number(process.env.DAILY_LIMIT_IMAGE || "5")
 const DATABASE_URL = process.env.DATABASE_URL || ""
+const PGHOST = process.env.PGHOST || ""
+const PGPORT = Number(process.env.PGPORT || "5432")
+const PGDATABASE = process.env.PGDATABASE || ""
+const PGUSER = process.env.PGUSER || ""
+const PGPASSWORD = process.env.PGPASSWORD || ""
 const PGSSL =
   process.env.PGSSL === "true" || /sslmode=require/i.test(DATABASE_URL)
 
@@ -68,9 +77,59 @@ if (!DATABASE_URL) {
 }
 
 const pool = new Pool({
-  connectionString: DATABASE_URL,
+  ...(DATABASE_URL
+    ? { connectionString: DATABASE_URL }
+    : {
+        host: PGHOST,
+        port: PGPORT,
+        database: PGDATABASE,
+        user: PGUSER,
+        password: PGPASSWORD
+      }),
   ssl: PGSSL ? { rejectUnauthorized: false } : false
 })
+
+async function initDb() {
+  await dbRun(`
+    CREATE TABLE IF NOT EXISTS users (
+      user_id TEXT PRIMARY KEY,
+      coins BIGINT NOT NULL DEFAULT 0,
+      messages BIGINT NOT NULL DEFAULT 0
+    )
+  `)
+  await dbRun(`
+    CREATE TABLE IF NOT EXISTS login_streak (
+      user_id TEXT PRIMARY KEY,
+      last_date TEXT NOT NULL,
+      streak INTEGER NOT NULL DEFAULT 0
+    )
+  `)
+  await dbRun(`
+    CREATE TABLE IF NOT EXISTS daily_usage (
+      user_id TEXT NOT NULL,
+      date TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      count INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (user_id, date, kind)
+    )
+  `)
+  await dbRun(`
+    CREATE TABLE IF NOT EXISTS bot_mute (
+      user_id TEXT PRIMARY KEY,
+      muted BOOLEAN NOT NULL DEFAULT FALSE,
+      mode TEXT
+    )
+  `)
+  await dbRun(`
+    CREATE TABLE IF NOT EXISTS site_accounts (
+      account_id TEXT PRIMARY KEY,
+      link_code TEXT UNIQUE NOT NULL,
+      link_code_expires_at TIMESTAMPTZ NOT NULL,
+      line_user_id TEXT UNIQUE,
+      linked_at TIMESTAMPTZ
+    )
+  `)
+}
 
 function safeStringify(obj) {
   try {
@@ -116,6 +175,43 @@ if (!fs.existsSync(STATIC_DIR)) {
 // ===== Express =====
 const app = express()
 app.use("/static", express.static(STATIC_DIR))
+app.get("/", (_req, res) => {
+  res.sendFile(path.join(STATIC_DIR, "dashboard.html"))
+})
+app.get("/panel", (_req, res) => {
+  res.redirect("/")
+})
+app.get("/api/dashboard", async (_req, res) => {
+  try {
+    const data = await buildDashboardData()
+    res.json(data)
+  } catch (e) {
+    logError("dashboard_error", e)
+    res.status(500).json({ error: "failed_to_build_dashboard" })
+  }
+})
+app.post("/api/site-accounts", express.json(), async (_req, res) => {
+  try {
+    const account = await createSiteAccount()
+    res.json(account)
+  } catch (e) {
+    logError("site_account_create_error", e)
+    res.status(500).json({ error: "failed_to_create_account" })
+  }
+})
+app.get("/api/site-accounts/:code", async (req, res) => {
+  try {
+    const account = await getSiteAccountByCode(req.params.code)
+    if (!account) {
+      res.status(404).json({ error: "not_found" })
+      return
+    }
+    res.json(account)
+  } catch (e) {
+    logError("site_account_lookup_error", e)
+    res.status(500).json({ error: "failed_to_lookup_account" })
+  }
+})
 // ===== Webhook =====
 app.post("/webhook", line.middleware(lineConfig), (req, res) => {
   res.sendStatus(200)
@@ -233,32 +329,36 @@ async function handleVideo(event) {
     return
   }
 
-  const tmpIn = path.join(__dirname, "in.mp4")
-  const tmpOut = path.join(__dirname, "out.mp4")
-  fs.writeFileSync(tmpIn, buffer)
-
+  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "line-video-"))
+  const tmpIn = path.join(workDir, "input.mp4")
   const steps = [
-    { size: "854x480", bitrate: "800k" },
-    { size: "640x360", bitrate: "500k" }
+    { size: "854x480", bitrate: "900k" },
+    { size: "640x360", bitrate: "600k" },
+    { size: "480x270", bitrate: "420k" }
   ]
 
-  for (let i = 0; i < steps.length; i++) {
-    await encodeVideo(tmpIn, tmpOut, steps[i])
-    const outBuf = fs.readFileSync(tmpOut)
+  try {
+    fs.writeFileSync(tmpIn, buffer)
 
-    if (outBuf.length <= MAX_SIZE) {
-      await sendDiscordFile(
-        outBuf,
-        "video.mp4",
-        `VIDEO\n送信者：${name}（圧縮${i + 1}回）`
-      )
-      cleanup(tmpIn, tmpOut)
-      return
+    for (let i = 0; i < steps.length; i++) {
+      const tmpOut = path.join(workDir, `output-${i}.mp4`)
+      await encodeVideo(tmpIn, tmpOut, steps[i])
+      const outBuf = fs.readFileSync(tmpOut)
+
+      if (outBuf.length <= MAX_SIZE) {
+        await sendDiscordFile(
+          outBuf,
+          "video.mp4",
+          `VIDEO\n送信者：${name}（圧縮${i + 1}回）`
+        )
+        return
+      }
     }
-  }
 
-  cleanup(tmpIn, tmpOut)
-  await sendDiscord(`動画サイズオーバー\n送信者：${name}`)
+    await sendDiscord(`動画サイズオーバー\n送信者：${name}`)
+  } finally {
+    cleanup(workDir)
+  }
 }
 
 // ===== 圧縮 =====
@@ -283,7 +383,15 @@ function encodeVideo(input, output, opt) {
     ffmpeg(input)
       .size(opt.size)
       .videoBitrate(opt.bitrate)
-      .outputOptions("-preset veryfast")
+      .outputOptions([
+        "-preset veryfast",
+        "-movflags +faststart",
+        "-pix_fmt yuv420p",
+        "-c:v libx264",
+        "-c:a aac",
+        "-b:a 128k",
+        "-ac 2"
+      ])
       .save(output)
       .on("end", resolve)
       .on("error", reject)
@@ -316,8 +424,16 @@ async function sendDiscord(content) {
   }
 }
 
-function cleanup(...files) {
-  files.forEach(f => fs.existsSync(f) && fs.unlinkSync(f))
+function cleanup(...targets) {
+  for (const target of targets) {
+    if (!target || !fs.existsSync(target)) continue
+    const stat = fs.statSync(target)
+    if (stat.isDirectory()) {
+      fs.rmSync(target, { recursive: true, force: true })
+    } else {
+      fs.unlinkSync(target)
+    }
+  }
 }
 // ===== Data =====
 async function dbRun(sql, params = []) {
@@ -417,6 +533,99 @@ async function buildRankText(key, title) {
   return text
 }
 
+async function buildDashboardData() {
+  const [coinRank, messageRank, topUsers] = await Promise.all([
+    getRank("coins", 10),
+    getRank("messages", 10),
+    getTopUsers(10)
+  ])
+
+  const decorate = async (rows, unit) =>
+    Promise.all(
+      rows.map(async (row, index) => ({
+        rank: index + 1,
+        userId: row.user_id,
+        name: await getProfile(row.user_id),
+        value: row.value,
+        unit
+      }))
+    )
+
+  return {
+    updatedAt: new Date().toISOString(),
+    coinRank: await decorate(coinRank, "coins"),
+    messageRank: await decorate(messageRank, "messages"),
+    topUsers: await Promise.all(
+      topUsers.map(async (row, index) => ({
+        rank: index + 1,
+        userId: row.user_id,
+        name: await getProfile(row.user_id),
+        coins: row.coins,
+        messages: row.messages
+      }))
+    ),
+    linkedAccounts: await countLinkedAccounts()
+  }
+}
+
+function pickSlotResult() {
+  const roll = Math.random()
+  if (roll < 1 / 3) return { multiplier: 2, label: "2倍" }
+  if (roll < 1 / 3 + 1 / 5) return { multiplier: 5, label: "5倍" }
+  if (roll < 1 / 3 + 1 / 5 + 1 / 10) return { multiplier: 10, label: "10倍" }
+  return { multiplier: 0, label: "ハズレ" }
+}
+
+async function handleSlot(event, text) {
+  const match = text.trim().match(SLOT_BET_REGEX)
+  if (!match) return false
+
+  const userId = event.source.userId
+  const currentCoins = await getCoins(userId)
+  const betRaw = (match[1] || "").trim()
+
+  if (!betRaw) {
+    await replyText(event, "使い方: /slot 100 か /slot all")
+    return true
+  }
+
+  const bet = betRaw.toLowerCase() === "all" ? currentCoins : Number(betRaw)
+  if (!Number.isFinite(bet) || bet <= 0) {
+    await replyText(event, "ベットは1以上の数値か all を指定してね。")
+    return true
+  }
+
+  if (currentCoins <= 0) {
+    await replyText(event, "コインがありません。")
+    return true
+  }
+
+  if (bet > currentCoins) {
+    await replyText(event, `コインが足りません。（所持：${currentCoins}）`)
+    return true
+  }
+
+  await addCoins(userId, -bet)
+  const result = pickSlotResult()
+  const payout = Math.floor(bet * result.multiplier)
+  if (payout > 0) {
+    await addCoins(userId, payout)
+  }
+
+  const after = await getCoins(userId)
+  const net = payout - bet
+  const lines = [
+    "🎰 スロット",
+    `ベット：${bet}`,
+    `結果：${result.label}`,
+    result.multiplier > 0 ? `当たり！ ${net >= 0 ? "+" : ""}${net} コイン` : `ハズレ… -${bet} コイン`,
+    `現在の所持コイン：${after}`
+  ]
+
+  await replyText(event, lines.join("\n"))
+  return true
+}
+
 
 // ===== User Commands =====
 async function handleUserCommands(event, text) {
@@ -500,12 +709,15 @@ async function handleUserCommands(event, text) {
       "/ai <内容>  -AIと会話-",
       "/mycoin  -自分のコイン数-",
       "/myrank  -自分の順位-",
+      "/login <コード>  -ホームページ連携-",
+      "/link <コード>  -ホームページ連携-",
       "/login  -ログインボーナス-",
       "/tenki  -天気-",
       "/omikuzi  -おみくじ-",
       "/rob @ユーザー  -そのユーザーのコインを盗む-",
       "/rank coints  -コインランキング-",
       "/coints <表/裏> <金額 or all>  -コイントスギャンブル-",
+      "/slot <金額 or all>  -コインスロット-",
       "/pay <金額> @メンション  -コイン送金-",
       "",
       "管理者のみ",
@@ -586,6 +798,35 @@ async function handleUserCommands(event, text) {
     }
   }
 
+  const loginLinkMatch = trimmed.match(/^\/login\s+([A-Za-z0-9]{6,12})$/i)
+  if (loginLinkMatch) {
+    const code = loginLinkMatch[1].toUpperCase()
+    const result = await linkSiteAccount(event.source.userId, code)
+
+    if (!result.ok) {
+      await replyText(event, result.message)
+      return true
+    }
+
+    await replyText(event, `連携しました。\nアカウントID: ${result.accountId}`)
+    return true
+  }
+
+  // ===== /link =====
+  const linkMatch = trimmed.match(LINK_CODE_REGEX)
+  if (linkMatch) {
+    const code = linkMatch[1].toUpperCase()
+    const result = await linkSiteAccount(event.source.userId, code)
+
+    if (!result.ok) {
+      await replyText(event, result.message)
+      return true
+    }
+
+    await replyText(event, `連携しました。\nアカウントID: ${result.accountId}`)
+    return true
+  }
+
   
 
 
@@ -604,7 +845,7 @@ async function handleUserCommands(event, text) {
     // ★ クールタイム（1時間）
     const quota = await consumeDailyQuota(fromId, "rob", 1, 60)
     if (!quota.ok) {
-      await replyText(event, `強盗はあと ${quota.remaining} 分後に再使用できます。`)
+      await replyText(event, `クールダウン中`)
       return true
     }
   
@@ -769,6 +1010,11 @@ async function handleUserCommands(event, text) {
 
     await replyText(event, msgLines.join("\n"))
     return true
+  }
+
+  // ===== /slot =====
+  if (SLOT_BET_REGEX.test(trimmed)) {
+    return handleSlot(event, text)
   }
 
 
@@ -994,6 +1240,83 @@ async function getRank(key, limit = 50) {
   return rows
 }
 
+async function getTopUsers(limit = 10) {
+  return dbAll(
+    "SELECT user_id, coins, messages FROM users ORDER BY coins DESC, messages DESC LIMIT $1",
+    [limit]
+  )
+}
+
+async function countLinkedAccounts() {
+  const row = await dbGet(
+    "SELECT COUNT(*)::int AS count FROM site_accounts WHERE line_user_id IS NOT NULL",
+    []
+  )
+  return row?.count ?? 0
+}
+
+async function createSiteAccount() {
+  const accountId = crypto.randomUUID()
+  const code = crypto.randomBytes(3).toString("hex").toUpperCase()
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000)
+
+  await dbRun(
+    `INSERT INTO site_accounts (account_id, link_code, link_code_expires_at)
+     VALUES ($1, $2, $3)`,
+    [accountId, code, expiresAt]
+  )
+
+  return { accountId, code, expiresAt: expiresAt.toISOString() }
+}
+
+async function getSiteAccountByCode(code) {
+  const row = await dbGet(
+    `SELECT account_id, link_code, link_code_expires_at, line_user_id, linked_at
+     FROM site_accounts
+     WHERE link_code = $1`,
+    [code.toUpperCase()]
+  )
+  if (!row) return null
+  return {
+    accountId: row.account_id,
+    code: row.link_code,
+    expiresAt: row.link_code_expires_at,
+    lineUserId: row.line_user_id,
+    linkedAt: row.linked_at
+  }
+}
+
+async function linkSiteAccount(lineUserId, code) {
+  await ensureUser(lineUserId)
+  const row = await dbGet(
+    `SELECT account_id, link_code_expires_at, line_user_id
+     FROM site_accounts
+     WHERE link_code = $1`,
+    [code.toUpperCase()]
+  )
+
+  if (!row) {
+    return { ok: false, message: "そのコードは見つかりません。" }
+  }
+
+  if (row.line_user_id) {
+    return { ok: false, message: "そのアカウントはすでに連携済みです。" }
+  }
+
+  if (new Date(row.link_code_expires_at).getTime() < Date.now()) {
+    return { ok: false, message: "そのコードは期限切れです。サイトで再発行してください。" }
+  }
+
+  await dbRun(
+    `UPDATE site_accounts
+     SET line_user_id = $1, linked_at = NOW()
+     WHERE account_id = $2`,
+    [lineUserId, row.account_id]
+  )
+
+  return { ok: true, accountId: row.account_id }
+}
+
 async function getUserRank(userId, key) {
   const rows = await dbAll(
     `SELECT user_id, ${key} AS value FROM users ORDER BY ${key} DESC`,
@@ -1166,6 +1489,13 @@ function isQuotaError(e) {
 
 // ===== サーバ起動 =====
 const PORT = process.env.PORT || 3000
-app.listen(PORT, () => {
-  console.log(`Bot running on port ${PORT}`)
-})
+initDb()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`Bot running on port ${PORT}`)
+    })
+  })
+  .catch((e) => {
+    logError("db_init_error", e)
+    process.exit(1)
+  })

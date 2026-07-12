@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LINE Bot Site</title>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --text: #111111;
+      --muted: #666666;
+      --line: #e5e5e5;
+      --soft: #f7f7f7;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      line-height: 1.5;
+    }
+    .wrap { max-width: 1120px; margin: 0 auto; padding: 40px 20px 56px; }
+    header {
+      display: flex; justify-content: space-between; gap: 16px; align-items: end;
+      border-bottom: 1px solid var(--line); padding-bottom: 18px; margin-bottom: 28px;
+    }
+    h1 { margin: 0; font-size: clamp(2rem, 4vw, 3.25rem); letter-spacing: -0.04em; font-weight: 700; }
+    .sub { margin-top: 8px; color: var(--muted); font-size: 0.98rem; }
+    .badge, .code-box {
+      border: 1px solid var(--line); border-radius: 999px; padding: 10px 14px;
+      color: var(--muted); background: var(--soft); white-space: nowrap;
+    }
+    .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px; }
+    .card {
+      grid-column: span 12; border: 1px solid var(--line); border-radius: 18px;
+      padding: 18px; background: #fff;
+    }
+    .half { grid-column: span 6; }
+    h2 { margin: 0 0 14px; font-size: 1.05rem; font-weight: 700; letter-spacing: -0.02em; }
+    .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+    .stat {
+      background: var(--soft); border: 1px solid var(--line); border-radius: 14px; padding: 16px;
+    }
+    .stat .label { color: var(--muted); font-size: 0.88rem; }
+    .stat .value { margin-top: 8px; font-size: 1.6rem; font-weight: 700; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.96rem; }
+    th, td { text-align: left; padding: 11px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; }
+    .empty { color: var(--muted); padding: 12px 0; }
+    .actions { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+    button {
+      border: 1px solid #111; background: #111; color: #fff; border-radius: 999px;
+      padding: 11px 16px; cursor: pointer; font: inherit;
+    }
+    button:hover { opacity: 0.9; }
+    .helper { color: var(--muted); font-size: 0.92rem; }
+    .create-result {
+      margin-top: 12px; display: grid; gap: 8px;
+      padding: 14px; border: 1px solid var(--line); border-radius: 14px; background: var(--soft);
+    }
+    @media (max-width: 900px) {
+      .half { grid-column: span 12; }
+      .stats { grid-template-columns: 1fr 1fr; }
+      header { flex-direction: column; align-items: start; }
+    }
+    @media (max-width: 640px) {
+      .stats { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div>
+        <h1>TANISHI Bot</h1>
+        <div class="sub">タニシbotダッシュボード</div>
+      </div>
+      <div class="badge" id="updatedAt">loading...</div>
+    </header>
+
+    <section class="grid">
+      <div class="card">
+        <h2>Account Linking</h2>
+        <div class="actions">
+          <button id="createAccount">アカウントを作る</button>
+          <div class="helper">作成したコードを LINE で <code>/link コード</code> と送って連携します。</div>
+        </div>
+        <div id="accountResult" class="create-result" style="display:none;"></div>
+      </div>
+
+      <div class="card">
+        <h2>Overview</h2>
+        <div class="stats" id="stats"></div>
+      </div>
+
+      <div class="card half">
+        <h2>Coin Ranking</h2>
+        <table><thead><tr><th>Rank</th><th>Name</th><th>Coins</th></tr></thead><tbody id="coinRank"></tbody></table>
+      </div>
+
+      <div class="card half">
+        <h2>Message Ranking</h2>
+        <table><thead><tr><th>Rank</th><th>Name</th><th>Messages</th></tr></thead><tbody id="messageRank"></tbody></table>
+      </div>
+
+      <div class="card">
+        <h2>Top Users</h2>
+        <table><thead><tr><th>Rank</th><th>Name</th><th>Coins</th><th>Messages</th><th>User ID</th></tr></thead><tbody id="topUsers"></tbody></table>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const dateFormatter = new Intl.DateTimeFormat("ja-JP", { dateStyle: "medium", timeStyle: "medium" });
+
+    function renderRows(items, columns) {
+      if (!items.length) return `<tr><td class="empty" colspan="${columns.length}">データがありません</td></tr>`;
+      return items.map((item) => `<tr>${columns.map((key) => `<td>${item[key] ?? "-"}</td>`).join("")}</tr>`).join("");
+    }
+
+    async function loadDashboard() {
+      const response = await fetch("/api/dashboard");
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "failed_to_load");
+
+      document.getElementById("updatedAt").textContent = `Updated ${dateFormatter.format(new Date(data.updatedAt))}`;
+      document.getElementById("stats").innerHTML = [
+        { label: "Coin Leaders", value: data.coinRank.length },
+        { label: "Message Leaders", value: data.messageRank.length },
+        { label: "Tracked Users", value: data.topUsers.length },
+        { label: "Linked Accounts", value: data.linkedAccounts ?? "-" }
+      ].map((item) => `
+        <div class="stat">
+          <div class="label">${item.label}</div>
+          <div class="value">${item.value}</div>
+        </div>
+      `).join("");
+      document.getElementById("coinRank").innerHTML = renderRows(data.coinRank, ["rank", "name", "value"]);
+      document.getElementById("messageRank").innerHTML = renderRows(data.messageRank, ["rank", "name", "value"]);
+      document.getElementById("topUsers").innerHTML = renderRows(data.topUsers, ["rank", "name", "coins", "messages", "userId"]);
+    }
+
+    async function createAccount() {
+      const response = await fetch("/api/site-accounts", { method: "POST" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "failed_to_create");
+
+      const box = document.getElementById("accountResult");
+      box.style.display = "grid";
+      box.innerHTML = `
+        <div><strong>Account ID</strong><br>${data.accountId}</div>
+        <div><strong>Link Code</strong><br><span class="code-box">${data.code}</span></div>
+        <div><strong>Expires</strong><br>${dateFormatter.format(new Date(data.expiresAt))}</div>
+        <div class="helper">LINEで <code>/link ${data.code}</code> を送って連携してください。</div>
+      `;
+    }
+
+    document.getElementById("createAccount").addEventListener("click", () => {
+      createAccount().catch((error) => alert(error.message));
+    });
+
+    loadDashboard().catch((error) => {
+      document.getElementById("updatedAt").textContent = "load failed";
+      document.body.insertAdjacentHTML("beforeend", `<pre style="padding:20px;color:#b00020;">${error.message}</pre>`);
+    });
+  </script>
+</body>
+</html>
