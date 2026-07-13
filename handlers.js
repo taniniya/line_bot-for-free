@@ -6,7 +6,8 @@ const {
   sendDiscord,
   sendDiscordFile,
   isHandled,
-  logError
+  logError,
+  askAi
 } = require("./utils")
 
 const {
@@ -30,11 +31,14 @@ const {
   registerSiteUser,
   loginSiteUser,
   getSessionFromRequest,
-  getSiteUserById
+  getSiteUserById,
+  createSiteAccount,
+  lookupSiteAccount
 } = require("./db")
 
-const { askAi } = require("./utils")
-
+// =========================
+// LINE イベント処理
+// =========================
 async function handleEvent(event) {
   try {
     if (event.type === "message") {
@@ -65,23 +69,22 @@ async function handleEvent(event) {
   }
 }
 
+// =========================
+// テキスト処理
+// =========================
 async function handleText(event) {
   const userId = event.source.userId
   const text = event.message.text || ""
 
   await addMessage(userId)
 
-  const userHandled = await handleUserCommands(event, text)
-  if (userHandled) return
-
-  const adminHandled = await handleAdminCommands(event, text)
-  if (adminHandled) return
-
   const name = await getProfile(userId)
-
   await sendDiscord(`LINE\n送信者：${name}\n内容：${text}`)
 }
 
+// =========================
+// 画像処理
+// =========================
 async function handleImage(event) {
   const name = await getProfile(event.source.userId)
   const buffer = await getLineContent(event.message.id)
@@ -99,6 +102,9 @@ async function handleImage(event) {
   )
 }
 
+// =========================
+// 動画処理
+// =========================
 async function handleVideo(event) {
   const name = await getProfile(event.source.userId)
   const buffer = await getLineContent(event.message.id)
@@ -107,6 +113,10 @@ async function handleVideo(event) {
     await sendDiscordFile(buffer, "video.mp4", `VIDEO\n送信者：${name}`)
     return
   }
+
+  const fs = require("fs")
+  const os = require("os")
+  const path = require("path")
 
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "line-video-"))
   const tmpIn = path.join(workDir, "input.mp4")
@@ -136,14 +146,124 @@ async function handleVideo(event) {
 
     await sendDiscord(`動画サイズオーバー\n送信者：${name}`)
   } finally {
-    cleanup(workDir)
+    fs.rmSync(workDir, { recursive: true, force: true })
   }
 }
 
+// =========================
+// Dashboard API
+// =========================
+async function handleDashboardApi(req, res) {
+  try {
+    const topUsers = await getTopUsers()
+    const ranks = await getRank()
+    const linkedCount = await countLinkedAccounts()
 
+    res.json({
+      ok: true,
+      topUsers,
+      ranks,
+      linkedCount
+    })
+  } catch (e) {
+    logError("dashboard_api_error", e)
+    res.json({ ok: false })
+  }
+}
 
+// =========================
+// Site Account Create
+// =========================
+async function handleSiteAccountCreate(req, res) {
+  try {
+    const { siteUserId } = req.body
+    const result = await createSiteAccount(siteUserId)
+    res.json(result)
+  } catch (e) {
+    logError("site_account_create_error", e)
+    res.json({ ok: false })
+  }
+}
+
+// =========================
+// Site Account Lookup
+// =========================
+async function handleSiteAccountLookup(req, res) {
+  try {
+    const code = req.params.code
+    const result = await lookupSiteAccount(code)
+    res.json(result)
+  } catch (e) {
+    logError("site_account_lookup_error", e)
+    res.json({ ok: false })
+  }
+}
+
+// =========================
+// Register
+// =========================
+async function handleRegister(req, res) {
+  try {
+    const { username, password } = req.body
+    const result = await registerSiteUser(username, password)
+    res.json(result)
+  } catch (e) {
+    logError("register_error", e)
+    res.json({ ok: false })
+  }
+}
+
+// =========================
+// Login
+// =========================
+async function handleLogin(req, res) {
+  try {
+    const { username, password } = req.body
+    const result = await loginSiteUser(username, password)
+    res.json(result)
+  } catch (e) {
+    logError("login_error", e)
+    res.json({ ok: false })
+  }
+}
+
+// =========================
+// Logout
+// =========================
+async function handleLogout(req, res) {
+  try {
+    res.json({ ok: true })
+  } catch (e) {
+    logError("logout_error", e)
+    res.json({ ok: false })
+  }
+}
+
+// =========================
+// Auth Me
+// =========================
+async function handleAuthMe(req, res) {
+  try {
+    const session = await getSessionFromRequest(req)
+    if (!session) {
+      res.json({ ok: false })
+      return
+    }
+
+    const user = await getSiteUserById(session.site_user_id)
+    res.json({ ok: true, user })
+  } catch (e) {
+    logError("auth_me_error", e)
+    res.json({ ok: false })
+  }
+}
+
+// =========================
+// Export
+// =========================
 module.exports = {
   handleEvent,
+  handleDashboardApi,
   handleSiteAccountCreate,
   handleSiteAccountLookup,
   handleRegister,
