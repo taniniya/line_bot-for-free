@@ -80,6 +80,7 @@
     <header>
       <div>
         <h1>TANISHI Bot</h1>
+        <div class="sub">サイトログインとLINE連携をひとまとめにしました。</div>
       </div>
       <div class="badge" id="updatedAt">loading...</div>
     </header>
@@ -97,6 +98,14 @@
         <div class="helper" id="authStatus">Not signed in.</div>
       </div>
 
+      <div class="card">
+        <h2>LINE Linking</h2>
+        <div class="actions">
+          <button id="createAccountBtn">Create Link Code</button>
+          <div class="helper">LINEで <code>/link CODE</code> を送ると連携できます。</div>
+        </div>
+        <div id="linkBox" class="box" style="display:none;"></div>
+      </div>
 
       <div class="card">
         <h2>Overview</h2>
@@ -186,7 +195,21 @@
       await refreshMe();
     }
 
-  
+    async function createLinkCode() {
+      const data = await api("/api/site-accounts", { method: "POST" });
+      const box = document.getElementById("linkBox");
+      box.style.display = "grid";
+      box.innerHTML = `
+        <div><strong>Account ID</strong><div>${data.accountId}</div></div>
+        <div><strong>Link Code</strong><div class="code">${data.code}</div></div>
+        <div><strong>Expires</strong><div>${dateFormatter.format(new Date(data.expiresAt))}</div></div>
+        <div class="helper">${currentUser ? "Logged-in account is ready for LINE linking." : "Sign in first if you want this saved to your site account."}</div>
+      `;
+      if (currentUser) {
+        await refreshMe();
+      }
+    }
+
     document.getElementById("registerBtn").addEventListener("click", () => {
       register().catch((error) => alert(error.message));
     });
