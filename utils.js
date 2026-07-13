@@ -1,144 +1,160 @@
 const axios = require("axios")
-const FormData = require("form-data")
 const sharp = require("sharp")
 const fs = require("fs")
 const path = require("path")
-const os = require("os")
-const ffmpeg = require("fluent-ffmpeg")
-const ffmpegPath = require("ffmpeg-static")
+const { logError } = require("./utils")
 
-ffmpeg.setFfmpegPath(ffmpegPath)
-
-function logError(label, err, meta = {}) {
-  console.error(JSON.stringify({
-    label,
-    message: err?.message,
-    stack: err?.stack,
-    status: err?.response?.status,
-    data: err?.response?.data,
-    ...meta
-  }))
-}
+// =====================================
+// handledEvents（重複イベント防止）
+// =====================================
+const handledEvents = new Set()
 
 function isHandled(event) {
-  const id = event.message?.id
-  if (!id) return false
-  if (handledEvents.has(id)) return true
-  handledEvents.add(id)
-  setTimeout(() => handledEvents.delete(id), 5 * 60 * 1000)
+  const key = `${event.source.userId}:${event.timestamp}`
+  if (handledEvents.has(key)) return true
+  handledEvents.add(key)
   return false
 }
 
-async function getLineContent(messageId) {
-  const res = await axios.get(
-    `https://api-data.line.me/v2/bot/message/${messageId}/content`,
-    {
-      responseType: "arraybuffer",
-      headers: {
-        Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`
-      }
-    }
-  )
-  return Buffer.from(res.data)
-}
-
-async function compressImage(buffer) {
-  if (buffer.length <= 8 * 1024 * 1024) return { ok: true, buffer, step: 0 }
-
-  let out = await sharp(buffer).jpeg({ quality: 75 }).toBuffer()
-  if (out.length <= 8 * 1024 * 1024) return { ok: true, buffer: out, step: 1 }
-
-  out = await sharp(out)
-    .resize({ width: 1280, withoutEnlargement: true })
-    .jpeg({ quality: 50 })
-    .toBuffer()
-
-  if (out.length <= 8 * 1024 * 1024) return { ok: true, buffer: out, step: 2 }
-
-  return { ok: false }
-}
-
-async function encodeVideo(input, output, opt) {
-  return new Promise((resolve, reject) => {
-    ffmpeg(input)
-      .size(opt.size)
-      .videoBitrate(opt.bitrate)
-      .outputOptions([
-        "-preset veryfast",
-        "-movflags +faststart",
-        "-pix_fmt yuv420p",
-        "-c:v libx264",
-        "-c:a aac",
-        "-b:a 128k",
-        "-ac 2"
-      ])
-      .save(output)
-      .on("end", resolve)
-      .on("error", reject)
-  })
-}
-
-async function sendDiscord(content) {
+// =====================================
+// LINE プロフィール取得
+// =====================================
+async function getProfile(userId) {
   try {
-    await axios.post(
-      process.env.DISCORD_WEBHOOK_URL,
-      { content },
-      { headers: { "Content-Type": "application/json" } }
+    const res = await axios.get(
+      `https://api.line.me/v2/bot/profile/${userId}`,
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`
+        }
+      }
     )
+    return res.data.displayName || "Unknown"
   } catch (e) {
-    logError("discord_error", e)
+    return "Unknown"
   }
 }
 
-async function sendDiscordFile(buffer, filename, content) {
-  const form = new FormData()
-  form.append("payload_json", JSON.stringify({ content }))
-  form.append("file", buffer, { filename })
-
-  const res = await axios.post(process.env.DISCORD_WEBHOOK_URL, form, {
-    headers: form.getHeaders()
+// =====================================
+// LINE コンテンツ取得（画像・動画）
+// =====================================
+async function getLineContent(messageId) {
+  const url = `https://api-data.line.me/v2/bot/message/${messageId}/content`
+  const res = await axios.get(url, {
+    responseType: "arraybuffer",
+    headers: {
+      Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`
+    }
   })
-
-  return res.data?.attachments?.[0]?.url || null
+  return Buffer.from(res.data)
 }
 
+// =====================================
+// 画像圧縮
+// =====================================
+async function compressImage(buffer) {
+  try {
+    let current = buffer
+    for (let i = 0; i < 5; i++) {
+      const out = await sharp(current).jpeg({ quality: 70 }).toBuffer()
+      if (out.length <= 8 * 1024 * 1024) {
+        return { ok: true, buffer: out, step: i + 1 }
+      }
+      current = out
+    }
+    return { ok: false }
+  } catch (e) {
+    logError("image_compress_error", e)
+    return { ok: false }
+  }
+}
+
+// =====================================
+// 動画エンコード
+// =====================================
+async function encodeVideo(inputPath, outputPath, opts) {
+  const ffmpeg = require("fluent-ffmpeg")
+  return new Promise((resolve, reject) => {
+    ffmpeg(inputPath)
+      .size(opts.size)
+      .videoBitrate(opts.bitrate)
+      .output(outputPath)
+      .on("end", resolve)
+      .on("error", reject)
+      .run()
+  })
+}
+
+// =====================================
+// Discord 送信（テキスト）
+–=====================================
+async function sendDiscord(text) {
+  try {
+    await axios.post(process.env.DISCORD_WEBHOOK_URL, { content: text })
+  } catch (e) {
+    logError("discord_text_error", e)
+  }
+}
+
+// =====================================
+// Discord 送信（ファイル）
+–=====================================
+async function sendDiscordFile(buffer, filename, message) {
+  try {
+    const form = new FormData()
+    form.append("file", buffer, filename)
+    form.append("content", message)
+
+    await axios.post(process.env.DISCORD_WEBHOOK_URL, form, {
+      headers: form.getHeaders()
+    })
+  } catch (e) {
+    logError("discord_file_error", e)
+  }
+}
+
+// =====================================
+// AI 返信（必要なら使う）
+// =====================================
 async function askAi(prompt) {
   try {
     const res = await axios.post(
-      "https://openrouter.ai/api/v1/chat/completions",
+      "https://api.openai.com/v1/chat/completions",
       {
-        model: process.env.OPENROUTER_TEXT_MODEL,
+        model: "gpt-4o-mini",
         messages: [{ role: "user", content: prompt }]
       },
       {
         headers: {
-          Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-          "HTTP-Referer": process.env.OPENROUTER_HTTP_REFERER,
-          "X-Title": process.env.OPENROUTER_X_TITLE,
-          "Content-Type": "application/json"
-        },
-        timeout: 60000
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
+        }
       }
     )
-
-    const text =
-      res.data?.choices?.[0]?.message?.content?.trim() ||
-      "返答を生成できませんでした。"
-
-    return { ok: true, text }
+    return res.data.choices[0].message.content
   } catch (e) {
-    logError("openrouter_error", e)
-    return { ok: false, error: "AI呼び出し中にエラーが発生しました。" }
+    logError("ai_error", e)
+    return "AIエラー"
   }
 }
 
+// =====================================
+// エラー記録
+// =====================================
+function logError(label, error) {
+  console.error(JSON.stringify({ label, message: error.message, stack: error.stack }))
+}
+
+// =====================================
+// EXPORT
+// =====================================
 module.exports = {
-  logError,
   isHandled,
+  getProfile,
   getLineContent,
   compressImage,
   encodeVideo,
   sendDiscord,
   sendDiscordFile,
-  askAi
+  askAi,
+  logError
 }
