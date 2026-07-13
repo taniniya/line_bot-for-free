@@ -2,7 +2,6 @@ const axios = require("axios")
 const sharp = require("sharp")
 const fs = require("fs")
 const path = require("path")
-const { logError } = require("./utils")
 
 // =====================================
 // handledEvents（重複イベント防止）
