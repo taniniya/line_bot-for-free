@@ -140,14 +140,10 @@ async function handleVideo(event) {
   }
 }
 
-//
-// User Commands / Admin Commands
-// （あなたの index.txt の内容を完全に移植）
-//
+
 
 module.exports = {
   handleEvent,
-  handleDashboardApi,
   handleSiteAccountCreate,
   handleSiteAccountLookup,
   handleRegister,
