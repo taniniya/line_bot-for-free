@@ -2,6 +2,7 @@ const axios = require("axios")
 const sharp = require("sharp")
 const fs = require("fs")
 const path = require("path")
+const FormData = require("form-data")
 
 // =====================================
 // handledEvents（重複イベント防止）
@@ -86,7 +87,7 @@ async function encodeVideo(inputPath, outputPath, opts) {
 
 // =====================================
 // Discord 送信（テキスト）
-–=====================================
+// =====================================
 async function sendDiscord(text) {
   try {
     await axios.post(process.env.DISCORD_WEBHOOK_URL, { content: text })
@@ -97,7 +98,7 @@ async function sendDiscord(text) {
 
 // =====================================
 // Discord 送信（ファイル）
-–=====================================
+// =====================================
 async function sendDiscordFile(buffer, filename, message) {
   try {
     const form = new FormData()
@@ -140,7 +141,11 @@ async function askAi(prompt) {
 // エラー記録
 // =====================================
 function logError(label, error) {
-  console.error(JSON.stringify({ label, message: error.message, stack: error.stack }))
+  console.error(JSON.stringify({
+    label,
+    message: error.message,
+    stack: error.stack
+  }))
 }
 
 // =====================================
