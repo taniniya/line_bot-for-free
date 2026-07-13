@@ -1,19 +1,35 @@
 const { Pool } = require("pg")
-const crypto = require("crypto")
-const { logError } = require("./utils")
+const { getTodayJst } = require("./utils")
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-})
+const DATABASE_URL = process.env.DATABASE_URL || ""
+const PGHOST = process.env.PGHOST || ""
+const PGPORT = Number(process.env.PGPORT || "5432")
+const PGDATABASE = process.env.PGDATABASE || ""
+const PGUSER = process.env.PGUSER || ""
+const PGPASSWORD = process.env.PGPASSWORD || ""
+const PGSSL =
+  process.env.PGSSL === "true" || /sslmode=require/i.test(DATABASE_URL)
+
+if (!DATABASE_URL && !PGHOST) {
+  console.error("DATABASE_URL or PGHOST is required for PostgreSQL.")
+  process.exit(1)
+}
+
+const pool = new Pool(
+  DATABASE_URL
+    ? { connectionString: DATABASE_URL, ssl: PGSSL ? { rejectUnauthorized: false } : false }
+    : {
+        host: PGHOST,
+        port: PGPORT,
+        database: PGDATABASE,
+        user: PGUSER,
+        password: PGPASSWORD,
+        ssl: PGSSL ? { rejectUnauthorized: false } : false
+      }
+)
 
 async function dbRun(sql, params = []) {
   return pool.query(sql, params)
-}
-
-async function dbGet(sql, params = []) {
-  const res = await pool.query(sql, params)
-  return res.rows[0] || null
 }
 
 async function dbAll(sql, params = []) {
@@ -21,15 +37,25 @@ async function dbAll(sql, params = []) {
   return res.rows
 }
 
-// ===============================
-// INIT
-// ===============================
+async function dbGet(sql, params = []) {
+  const res = await pool.query(sql, params)
+  return res.rows[0] || null
+}
+
 async function initDb() {
   await dbRun(`
     CREATE TABLE IF NOT EXISTS users (
       user_id TEXT PRIMARY KEY,
       coins BIGINT NOT NULL DEFAULT 0,
       messages BIGINT NOT NULL DEFAULT 0
+    )
+  `)
+
+  await dbRun(`
+    CREATE TABLE IF NOT EXISTS login_streak (
+      user_id TEXT PRIMARY KEY,
+      last_date TEXT NOT NULL,
+      streak INTEGER NOT NULL DEFAULT 0
     )
   `)
 
@@ -82,255 +108,362 @@ async function initDb() {
   `)
 }
 
-// ===============================
-// USERS
-// ===============================
-async function addMessage(userId) {
+// ユーザー
+async function ensureUser(userId) {
   await dbRun(
-    `
-    INSERT INTO users (user_id, messages)
-    VALUES ($1, 1)
-    ON CONFLICT (user_id)
-    DO UPDATE SET messages = users.messages + 1
-    `,
+    "INSERT INTO users (user_id, coins, messages) VALUES ($1, 0, 0) ON CONFLICT (user_id) DO NOTHING",
     [userId]
   )
 }
 
 async function getCoins(userId) {
-  const row = await dbGet(`SELECT coins FROM users WHERE user_id=$1`, [userId])
-  return row ? Number(row.coins) : 0
+  await ensureUser(userId)
+  const row = await dbGet("SELECT coins FROM users WHERE user_id = $1", [userId])
+  return row?.coins ?? 0
 }
 
 async function addCoins(userId, amount) {
+  await ensureUser(userId)
   await dbRun(
-    `
-    INSERT INTO users (user_id, coins)
-    VALUES ($1, $2)
-    ON CONFLICT (user_id)
-    DO UPDATE SET coins = users.coins + $2
-    `,
-    [userId, amount]
+    "UPDATE users SET coins = coins + $1 WHERE user_id = $2",
+    [amount, userId]
   )
 }
 
 async function transferCoins(fromId, toId, amount) {
-  const fromCoins = await getCoins(fromId)
-  if (fromCoins < amount) return false
+  await ensureUser(fromId)
+  await ensureUser(toId)
 
-  await addCoins(fromId, -amount)
-  await addCoins(toId, amount)
-  return true
+  const row = await dbGet("SELECT coins FROM users WHERE user_id = $1", [fromId])
+  const balance = row?.coins ?? 0
+
+  if (balance < amount) {
+    return { ok: false, balance }
+  }
+
+  await dbRun("UPDATE users SET coins = coins - $1 WHERE user_id = $2", [
+    amount,
+    fromId
+  ])
+  await dbRun("UPDATE users SET coins = coins + $1 WHERE user_id = $2", [
+    amount,
+    toId
+  ])
+
+  return { ok: true }
 }
 
-// ===============================
-// RANK
-// ===============================
-async function getRank() {
-  return dbAll(`
-    SELECT user_id, coins, messages
-    FROM users
-    ORDER BY coins DESC
-    LIMIT 100
-  `)
+async function addMessage(userId) {
+  await ensureUser(userId)
+  await dbRun("UPDATE users SET messages = messages + 1 WHERE user_id = $1", [
+    userId
+  ])
 }
 
-async function getTopUsers() {
-  return dbAll(`
-    SELECT user_id, coins, messages
-    FROM users
-    ORDER BY messages DESC
-    LIMIT 20
-  `)
+// streak
+async function getLoginStreak(userId) {
+  const row = await dbGet(
+    "SELECT last_date, streak FROM login_streak WHERE user_id = $1",
+    [userId]
+  )
+  return row || null
 }
 
-// ===============================
-// DAILY USAGE
-// ===============================
+async function updateLoginStreak(userId) {
+  const today = getTodayJst()
+  const row = await getLoginStreak(userId)
+
+  if (!row) {
+    await dbRun(
+      "INSERT INTO login_streak (user_id, last_date, streak) VALUES ($1, $2, 1)",
+      [userId, today]
+    )
+    return 1
+  }
+
+  if (row.last_date === today) {
+    return row.streak
+  }
+
+  const yesterday = new Date(today)
+  yesterday.setDate(yesterday.getDate() - 1)
+  const y = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(yesterday)
+
+  let newStreak = 1
+  if (row.last_date === y) {
+    newStreak = row.streak + 1
+  }
+
+  await dbRun(
+    "UPDATE login_streak SET last_date = $1, streak = $2 WHERE user_id = $3",
+    [today, newStreak, userId]
+  )
+
+  return newStreak
+}
+
+// ランキング
+async function getRank(key, limit = 50) {
+  const rows = await dbAll(
+    `SELECT user_id, ${key} AS value FROM users ORDER BY ${key} DESC LIMIT $1`,
+    [limit]
+  )
+  return rows
+}
+
+async function getTopUsers(limit = 10) {
+  return dbAll(
+    "SELECT user_id, coins, messages FROM users ORDER BY coins DESC, messages DESC LIMIT $1",
+    [limit]
+  )
+}
+
+async function getUserRank(userId, key) {
+  const rows = await dbAll(
+    `SELECT user_id, ${key} AS value FROM users ORDER BY ${key} DESC`,
+    []
+  )
+  const index = rows.findIndex(r => r.user_id === userId)
+  return index >= 0 ? index + 1 : null
+}
+
+async function countLinkedAccounts() {
+  const row = await dbGet(
+    "SELECT COUNT(*)::int AS count FROM site_accounts WHERE line_user_id IS NOT NULL",
+    []
+  )
+  return row?.count ?? 0
+}
+
+// daily quota
 async function consumeDailyQuota(userId, kind, limit) {
-  const today = new Date().toISOString().slice(0, 10)
+  const today = getTodayJst()
 
   const row = await dbGet(
-    `SELECT count FROM daily_usage WHERE user_id=$1 AND date=$2 AND kind=$3`,
+    "SELECT count FROM daily_usage WHERE user_id = $1 AND date = $2 AND kind = $3",
     [userId, today, kind]
   )
 
   if (!row) {
     await dbRun(
-      `INSERT INTO daily_usage (user_id, date, kind, count) VALUES ($1,$2,$3,1)`,
+      "INSERT INTO daily_usage (user_id, date, kind, count) VALUES ($1, $2, $3, 1)",
       [userId, today, kind]
     )
-    return true
+    return { ok: true, count: 1, limit }
   }
 
-  if (row.count >= limit) return false
+  if (row.count >= limit) {
+    return { ok: false, count: row.count, limit }
+  }
 
   await dbRun(
-    `UPDATE daily_usage SET count=count+1 WHERE user_id=$1 AND date=$2 AND kind=$3`,
+    "UPDATE daily_usage SET count = count + 1 WHERE user_id = $1 AND date = $2 AND kind = $3",
     [userId, today, kind]
   )
 
-  return true
+  return { ok: true, count: row.count + 1, limit }
 }
 
-// ===============================
-// BOT MUTE
-// ===============================
+// mute
 async function isBotMuted(userId) {
-  const row = await dbGet(`SELECT muted FROM bot_mute WHERE user_id=$1`, [userId])
-  return row ? row.muted : false
+  const row = await dbGet(
+    "SELECT muted, mode FROM bot_mute WHERE user_id = $1",
+    [userId]
+  )
+  if (!row) return { muted: false, mode: null }
+  return { muted: row.muted, mode: row.mode }
 }
 
-async function setBotMuted(userId, muted) {
+async function setBotMuted(userId, muted, mode = null) {
   await dbRun(
-    `
-    INSERT INTO bot_mute (user_id, muted)
-    VALUES ($1, $2)
-    ON CONFLICT (user_id)
-    DO UPDATE SET muted=$2
-    `,
-    [userId, muted]
+    `INSERT INTO bot_mute (user_id, muted, mode)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (user_id) DO UPDATE SET muted = EXCLUDED.muted, mode = EXCLUDED.mode`,
+    [userId, muted, mode]
   )
 }
 
-// ===============================
-// SITE ACCOUNTS
-// ===============================
-async function createSiteAccount(siteUserId) {
+// site accounts
+async function createSiteAccount() {
+  const crypto = require("crypto")
   const accountId = crypto.randomUUID()
-  const linkCode = crypto.randomBytes(4).toString("hex")
-  const expires = new Date(Date.now() + 10 * 60 * 1000) // 10分
+  const code = crypto.randomBytes(3).toString("hex").toUpperCase()
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000)
 
   await dbRun(
-    `
-    INSERT INTO site_accounts (account_id, link_code, link_code_expires_at)
-    VALUES ($1,$2,$3)
-    `,
-    [accountId, linkCode, expires]
+    `INSERT INTO site_accounts (account_id, link_code, link_code_expires_at)
+     VALUES ($1, $2, $3)`,
+    [accountId, code, expiresAt]
   )
 
-  return { ok: true, accountId, linkCode }
+  return { accountId, code, expiresAt: expiresAt.toISOString() }
 }
 
-async function lookupSiteAccount(code) {
+async function getSiteAccountByCode(code) {
   const row = await dbGet(
-    `
-    SELECT * FROM site_accounts
-    WHERE link_code=$1
-    `,
-    [code]
+    `SELECT account_id, link_code, link_code_expires_at, line_user_id, linked_at
+     FROM site_accounts
+     WHERE link_code = $1`,
+    [code.toUpperCase()]
   )
-
-  if (!row) return { ok: false, reason: "not_found" }
-
-  if (new Date(row.link_code_expires_at) < new Date())
-    return { ok: false, reason: "expired" }
-
-  return { ok: true, account: row }
-}
-
-async function countLinkedAccounts() {
-  const row = await dbGet(
-    `SELECT COUNT(*) AS c FROM site_accounts WHERE line_user_id IS NOT NULL`
-  )
-  return Number(row.c)
-}
-
-// ===============================
-// SITE USERS
-// ===============================
-async function registerSiteUser(username, password) {
-  const id = crypto.randomUUID()
-  const hash = crypto.createHash("sha256").update(password).digest("hex")
-
-  try {
-    await dbRun(
-      `
-      INSERT INTO site_users (id, username, password_hash)
-      VALUES ($1,$2,$3)
-      `,
-      [id, username, hash]
-    )
-    return { ok: true }
-  } catch (e) {
-    return { ok: false, reason: "username_taken" }
+  if (!row) return null
+  return {
+    accountId: row.account_id,
+    code: row.link_code,
+    expiresAt: row.link_code_expires_at,
+    lineUserId: row.line_user_id,
+    linkedAt: row.linked_at
   }
 }
 
-async function loginSiteUser(username, password) {
-  const hash = crypto.createHash("sha256").update(password).digest("hex")
-
+async function linkSiteAccount(lineUserId, code) {
+  await ensureUser(lineUserId)
   const row = await dbGet(
-    `
-    SELECT * FROM site_users
-    WHERE username=$1 AND password_hash=$2
-    `,
-    [username, hash]
+    `SELECT account_id, link_code_expires_at, line_user_id
+     FROM site_accounts
+     WHERE link_code = $1`,
+    [code.toUpperCase()]
   )
 
-  if (!row) return { ok: false }
+  if (!row) {
+    return { ok: false, message: "そのコードは見つかりません。" }
+  }
 
-  const token = crypto.randomUUID()
-  const expires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+  if (row.line_user_id) {
+    return { ok: false, message: "そのアカウントはすでに連携済みです。" }
+  }
+
+  if (new Date(row.link_code_expires_at).getTime() < Date.now()) {
+    return { ok: false, message: "そのコードは期限切れです。サイトで再発行してください。" }
+  }
 
   await dbRun(
-    `
-    INSERT INTO site_sessions (token, site_user_id, expires_at)
-    VALUES ($1,$2,$3)
-    `,
-    [token, row.id, expires]
+    `UPDATE site_accounts
+     SET line_user_id = $1, linked_at = NOW()
+     WHERE account_id = $2`,
+    [lineUserId, row.account_id]
   )
 
-  return { ok: true, token }
+  return { ok: true, accountId: row.account_id }
 }
 
-async function getSessionFromRequest(req) {
-  const token = req.headers.authorization
-  if (!token) return null
+// site users / sessions
+async function registerSiteUser(username, password, hashPassword) {
+  const crypto = require("crypto")
+  const existing = await dbGet(
+    "SELECT id FROM site_users WHERE username = $1",
+    [username.toLowerCase()]
+  )
+  if (existing) {
+    return { ok: false, message: "そのユーザー名はすでに使われています。" }
+  }
 
-  const row = await dbGet(
-    `
-    SELECT * FROM site_sessions
-    WHERE token=$1 AND expires_at > NOW()
-    `,
+  const userId = crypto.randomUUID()
+  const token = crypto.randomBytes(32).toString("hex")
+  const passwordHash = hashPassword(password)
+  const expiresAt = new Date(Date.now() + 1000 * 60 * 60 * 24 * 30)
+
+  await dbRun(
+    `INSERT INTO site_users (id, username, password_hash)
+     VALUES ($1, $2, $3)`,
+    [userId, username.toLowerCase(), passwordHash]
+  )
+  await dbRun(
+    `INSERT INTO site_sessions (token, site_user_id, expires_at)
+     VALUES ($1, $2, $3)`,
+    [token, userId, expiresAt]
+  )
+
+  return {
+    ok: true,
+    token,
+    user: { id: userId, username: username.toLowerCase(), linkedLineUserId: null }
+  }
+}
+
+async function loginSiteUser(username, password, verifyPassword) {
+  const user = await dbGet(
+    "SELECT id, username, password_hash, linked_line_user_id FROM site_users WHERE username = $1",
+    [username.toLowerCase()]
+  )
+  if (!user || !verifyPassword(password, user.password_hash)) {
+    return { ok: false, message: "ユーザー名またはパスワードが違います。" }
+  }
+
+  const crypto = require("crypto")
+  const token = crypto.randomBytes(32).toString("hex")
+  const expiresAt = new Date(Date.now() + 1000 * 60 * 60 * 24 * 30)
+
+  await dbRun(
+    `INSERT INTO site_sessions (token, site_user_id, expires_at)
+     VALUES ($1, $2, $3)`,
+    [token, user.id, expiresAt]
+  )
+
+  return {
+    ok: true,
+    token,
+    user: { id: user.id, username: user.username, linkedLineUserId: user.linked_line_user_id }
+  }
+}
+
+async function getSessionByToken(token) {
+  const session = await dbGet(
+    "SELECT token, site_user_id, expires_at FROM site_sessions WHERE token = $1",
     [token]
   )
-
-  return row || null
+  if (!session) return null
+  if (new Date(session.expires_at).getTime() < Date.now()) {
+    await dbRun("DELETE FROM site_sessions WHERE token = $1", [token])
+    return null
+  }
+  return session
 }
 
-async function getSiteUserById(id) {
-  return dbGet(`SELECT * FROM site_users WHERE id=$1`, [id])
+async function getSiteUserById(userId) {
+  const user = await dbGet(
+    "SELECT id, username, created_at, linked_line_user_id, linked_account_id FROM site_users WHERE id = $1",
+    [userId]
+  )
+  if (!user) return null
+  return {
+    id: user.id,
+    username: user.username,
+    createdAt: user.created_at,
+    linkedLineUserId: user.linked_line_user_id,
+    linkedAccountId: user.linked_account_id
+  }
 }
 
-// ===============================
-// EXPORT
-// ===============================
 module.exports = {
   initDb,
   dbRun,
-  dbGet,
   dbAll,
-
-  addMessage,
+  dbGet,
+  ensureUser,
   getCoins,
   addCoins,
   transferCoins,
-
+  addMessage,
+  getLoginStreak,
+  updateLoginStreak,
   getRank,
   getTopUsers,
-
+  getUserRank,
+  countLinkedAccounts,
   consumeDailyQuota,
-
   isBotMuted,
   setBotMuted,
-
   createSiteAccount,
-  lookupSiteAccount,
-  countLinkedAccounts,
-
+  getSiteAccountByCode,
+  linkSiteAccount,
   registerSiteUser,
   loginSiteUser,
-  getSessionFromRequest,
+  getSessionByToken,
   getSiteUserById
 }
