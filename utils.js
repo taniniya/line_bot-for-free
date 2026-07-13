@@ -148,14 +148,15 @@ function getMentionedUserIds(event) {
   return mention.mentionees.map(m => m.userId).filter(Boolean)
 }
 
-// 日付（JST）
 function getTodayJst() {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Tokyo",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit"
-  }).format(new Date())
+  const now = new Date()
+  const jst = new Date(now.getTime() + 9 * 60 * 60 * 1000) // JST = UTC+9
+
+  const y = jst.getUTCFullYear()
+  const m = String(jst.getUTCMonth() + 1).padStart(2, "0")
+  const d = String(jst.getUTCDate()).padStart(2, "0")
+
+  return `${y}-${m}-${d}`
 }
 
 // AI（OpenRouter）
